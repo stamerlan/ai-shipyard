@@ -1,4 +1,12 @@
-import { BOAT, DEG, type BoatState, type Controls, type Telemetry, type Wind } from './physics';
+import { BOAT, DEG, wrap, type BoatState, type Controls, type Telemetry, type Wind } from './physics';
+import { lightOn, type World, type Buoy, type BuoyKind, type Light } from './world';
+import type { AIVessel } from './traffic';
+
+export interface Scene {
+  world: World | null;
+  vessels: AIVessel[];
+  night: boolean;
+}
 
 export interface Mark {
   x: number;
@@ -47,7 +55,7 @@ export class Renderer {
     return { w, h };
   }
 
-  draw(s: BoatState, c: Controls, t: Telemetry | null, wind: Wind & { gust?: number }, marks: Mark[], time: number, dt: number, zoom: number): void {
+  draw(s: BoatState, c: Controls, t: Telemetry | null, wind: Wind & { gust?: number }, marks: Mark[], time: number, dt: number, zoom: number, scene: Scene): void {
     const { w, h } = this.resize();
     const ctx = this.canvas.getContext('2d')!;
     const k = Math.max(9, Math.min(w, h) / 30) * zoom;
@@ -62,13 +70,247 @@ export class Renderer {
     ctx.fillRect(0, 0, w, h);
 
     this.drawGrid(v);
+    if (scene.world) this.drawWorld(v, scene.world);
     this.drawWindParticles(v, wind, dt);
     this.updateWake(s, dt);
     this.drawWake(v);
-    if (this.showNoGo) this.drawNoGo(v, s, wind);
+    if (this.showNoGo && !scene.night) this.drawNoGo(v, s, wind);
     for (const m of marks) this.drawMark(v, m, time);
+    for (const vs of scene.vessels) this.drawVessel(v, vs, wind.from, time);
+    if (scene.night) {
+      ctx.fillStyle = 'rgba(4,10,22,0.86)';
+      ctx.fillRect(0, 0, w, h);
+      if (scene.world) this.drawWorld(v, scene.world, true);
+      ctx.globalAlpha = 0.75;
+      for (const m of marks) this.drawMark(v, m, time);
+      ctx.globalAlpha = 1;
+    }
     this.drawBoat(v, s, c, t, time);
+    if (scene.night) {
+      if (scene.world) this.drawLights(v, scene.world, time);
+      for (const vs of scene.vessels) this.drawNavLights(v, vs.x, vs.y, vs.heading, vs.type === 'motor' || vs.type === 'ship', vs.halfL);
+      this.drawNavLights(v, s.x, s.y, s.heading, false, BOAT.length / 2);
+    }
     for (const m of marks) if (m.active) this.drawOffscreen(v, m, s);
+    for (const vs of scene.vessels) {
+      if (vs.encounter) this.drawOffscreen(v, { x: vs.x, y: vs.y, kind: 'mark' }, s, vs.encounter.giveWay === 'own' ? 'rgba(255,70,70,0.95)' : 'rgba(80,230,120,0.95)');
+    }
+    if (scene.world) this.drawMinimap(v, scene, s, marks);
+  }
+
+  // ---------- World ----------
+
+  private drawWorld(v: View, w: World, nightOutline = false): void {
+    const { ctx, k } = v;
+    for (const poly of w.land) {
+      ctx.beginPath();
+      poly.forEach(([x, y], i) => { const [sx, sy] = this.toScreen(v, x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+      ctx.closePath();
+      if (nightOutline) {
+        ctx.strokeStyle = 'rgba(160,190,220,0.25)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = '#d8c58e';
+        ctx.fill();
+        ctx.strokeStyle = '#f4ead0';
+        ctx.lineWidth = Math.max(2, 0.6 * k);
+        ctx.stroke();
+      }
+    }
+    if (nightOutline) return;
+    for (const sh of w.shoals) {
+      const [x, y] = this.toScreen(v, sh.x, sh.y);
+      ctx.fillStyle = 'rgba(150,215,210,0.75)';
+      ctx.beginPath(); ctx.arc(x, y, sh.r * k, 0, Math.PI * 2); ctx.fill();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#7b6a55';
+      for (let i = 0; i < 5; i++) {
+        const a = i * 2.4, rr = sh.r * 0.35 * ((i % 3) + 1) / 3;
+        ctx.beginPath(); ctx.arc(x + Math.cos(a) * rr * k, y + Math.sin(a) * rr * k, Math.max(2, sh.r * 0.12 * k), 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    for (const p of w.pontoons) {
+      const [x1, y1] = this.toScreen(v, p.x, p.y + p.h);
+      ctx.fillStyle = '#9a6b3c';
+      ctx.fillRect(x1, y1, p.w * k, p.h * k);
+      ctx.strokeStyle = '#6b4724';
+      ctx.strokeRect(x1, y1, p.w * k, p.h * k);
+    }
+    const [bx, by] = this.toScreen(v, w.berth.x, w.berth.y);
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.setLineDash([3, 3]);
+    ctx.strokeRect(bx - 2.5 * k, by - 2 * k, 5 * k, 4 * k);
+    ctx.setLineDash([]);
+    for (const b of w.buoys) this.drawBuoy(v, b);
+    for (const lh of w.lighthouses) this.drawLighthouse(v, lh.x, lh.y, lh.name === 'Маяк');
+  }
+
+  private drawBuoy(v: View, b: Buoy): void {
+    const [x, y] = this.toScreen(v, b.x, b.y);
+    if (x < -40 || y < -60 || x > v.w + 40 || y > v.h + 40) return;
+    const hgt = Math.max(22, Math.min(36, v.k * 2.4));
+    drawBuoyIcon(v.ctx, x, y, b.kind, hgt);
+  }
+
+  private drawLighthouse(v: View, x0: number, y0: number, big: boolean): void {
+    const { ctx } = v;
+    const [x, y] = this.toScreen(v, x0, y0);
+    if (x < -60 || y < -80 || x > v.w + 60 || y > v.h + 60) return;
+    const hgt = big ? Math.max(28, v.k * 4) : Math.max(16, v.k * 2);
+    const wdt = hgt * 0.32;
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x - wdt / 2, y); ctx.lineTo(x - wdt / 3, y - hgt); ctx.lineTo(x + wdt / 3, y - hgt); ctx.lineTo(x + wdt / 2, y); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#d7262e';
+    for (let i = 1; i < 4; i += 2) ctx.fillRect(x - wdt / 2.3, y - hgt * (i + 1) / 4.5, wdt / 1.15, hgt / 9);
+    ctx.fillStyle = '#ffe9a6';
+    ctx.fillRect(x - wdt / 3, y - hgt - wdt / 2.5, wdt / 1.5, wdt / 2.5);
+  }
+
+  private drawLights(v: View, w: World, time: number): void {
+    const items: { x: number; y: number; light: Light; r: number; phase: number }[] = [
+      ...w.buoys.map((b, i) => ({ x: b.x, y: b.y, light: b.light, r: 1, phase: i * 0.37 })),
+      ...w.lighthouses.map((l, i) => ({ x: l.x, y: l.y, light: l.light, r: l.name === 'Маяк' ? 3 : 1.4, phase: i * 0.7 })),
+    ];
+    const { ctx } = v;
+    for (const it of items) {
+      const [x, y] = this.toScreen(v, it.x, it.y);
+      const on = lightOn(it.light.char, time, it.phase);
+      const col = LIGHT_COLOR[it.light.color];
+      if (x < -200 || y < -200 || x > v.w + 200 || y > v.h + 200) continue;
+      if (on) {
+        const rad = Math.max(10, v.k * 2.2) * it.r;
+        const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
+        g.addColorStop(0, col);
+        g.addColorStop(0.25, col);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
+      } else {
+        ctx.fillStyle = 'rgba(120,130,150,0.35)';
+        ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = 'rgba(200,215,235,0.55)';
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(it.light.char, x, y + 18);
+    }
+  }
+
+  /** Sidelights (red to port, green to starboard), stern light, masthead light for power vessels. */
+  private drawNavLights(v: View, x0: number, y0: number, heading: number, power: boolean, halfL: number): void {
+    const { ctx, k } = v;
+    const [x, y] = this.toScreen(v, x0, y0);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(heading);
+    const dot = (lx: number, ly: number, col: string) => {
+      const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, 9);
+      g.addColorStop(0, col); g.addColorStop(0.35, col); g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(lx, ly, 9, 0, Math.PI * 2); ctx.fill();
+    };
+    const bowY = -halfL * k * 0.8;
+    dot(-0.6 * k, bowY, '#ff3b3b');
+    dot(0.6 * k, bowY, '#39ff6a');
+    dot(0, halfL * k * 0.95, '#ffffff');
+    if (power) dot(0, -halfL * k * 0.3, '#ffffff');
+    ctx.restore();
+  }
+
+  private drawVessel(v: View, vs: AIVessel, windFrom: number, time: number): void {
+    const { ctx, k } = v;
+    const [x, y] = this.toScreen(v, vs.x, vs.y);
+    const L = vs.halfL * 2 * k, B = vs.halfB * 2 * k;
+    if (x < -L - 40 || y < -L - 40 || x > v.w + L + 40 || y > v.h + L + 40) return;
+    if (vs.encounter) {
+      ctx.strokeStyle = vs.encounter.giveWay === 'own' ? 'rgba(255,70,70,0.9)' : 'rgba(80,230,120,0.9)';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath(); ctx.arc(x, y, Math.max(L, 30) * 0.7 + Math.sin(time * 5) * 2, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(vs.heading);
+    if (vs.type === 'ship') {
+      ctx.fillStyle = '#56616b';
+      ctx.strokeStyle = '#1d242a';
+      ctx.beginPath();
+      ctx.moveTo(0, -L / 2); ctx.quadraticCurveTo(B / 2, -L / 2 + B, B / 2, -L / 4); ctx.lineTo(B / 2, L / 2); ctx.lineTo(-B / 2, L / 2); ctx.lineTo(-B / 2, -L / 4); ctx.quadraticCurveTo(-B / 2, -L / 2 + B, 0, -L / 2);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#e9edf0';
+      ctx.fillRect(-B / 2.6, L / 2 - L / 5, B / 1.3, L / 7);
+    } else {
+      ctx.fillStyle = vs.type === 'motor' ? '#f4f4f4' : '#e0473c';
+      ctx.strokeStyle = '#222';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(0, -L / 2); ctx.bezierCurveTo(B * 0.6, -L * 0.2, B * 0.5, L * 0.3, B * 0.4, L / 2); ctx.lineTo(-B * 0.4, L / 2); ctx.bezierCurveTo(-B * 0.5, L * 0.3, -B * 0.6, -L * 0.2, 0, -L / 2);
+      ctx.fill(); ctx.stroke();
+      if (vs.type === 'motor') {
+        ctx.fillStyle = '#9fb3c4';
+        ctx.fillRect(-B * 0.3, -L * 0.1, B * 0.6, L * 0.25);
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(-B * 0.4, L / 2); ctx.lineTo(-B * 1.6, L * 1.4); ctx.moveTo(B * 0.4, L / 2); ctx.lineTo(B * 1.6, L * 1.4); ctx.stroke();
+      } else {
+        const twa = wrap(windFrom - vs.heading);
+        const side = twa >= 0 ? -1 : 1;
+        const ang = Math.min(Math.abs(twa) * 0.5, 80 * DEG);
+        const mastY = -L * 0.15;
+        const bx = side * Math.sin(ang) * L * 0.6, by = mastY + Math.cos(ang) * L * 0.6;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.moveTo(0, mastY); ctx.quadraticCurveTo(bx / 2 + side * L * 0.12, (mastY + by) / 2, bx, by); ctx.closePath(); ctx.fill(); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  private drawMinimap(v: View, scene: Scene, s: BoatState, marks: Mark[]): void {
+    const w = scene.world!;
+    const { ctx } = v;
+    const phone = v.w < 600;
+    const size = phone ? 96 : 128;
+    const bw0 = w.bounds.maxX - w.bounds.minX, bh0 = w.bounds.maxY - w.bounds.minY;
+    const ox = v.w - size - 8, oy = phone ? v.h - (size * bh0) / Math.max(bw0, bh0) - 8 : 112;
+    const bw = w.bounds.maxX - w.bounds.minX, bh = w.bounds.maxY - w.bounds.minY;
+    const sc = size / Math.max(bw, bh);
+    const mx = (x: number) => ox + (x - w.bounds.minX) * sc;
+    const my = (y: number) => oy + (w.bounds.maxY - y) * sc;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(ox, oy, bw * sc, bh * sc); ctx.clip();
+    ctx.fillStyle = 'rgba(20,70,110,0.85)';
+    ctx.fillRect(ox, oy, bw * sc, bh * sc);
+    ctx.fillStyle = '#cdb77f';
+    for (const poly of w.land) {
+      ctx.beginPath();
+      poly.forEach(([x, y], i) => (i ? ctx.lineTo(mx(x), my(y)) : ctx.moveTo(mx(x), my(y))));
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(150,215,210,0.9)';
+    for (const sh of w.shoals) { ctx.beginPath(); ctx.arc(mx(sh.x), my(sh.y), Math.max(1.5, sh.r * sc), 0, Math.PI * 2); ctx.fill(); }
+    for (const b of w.buoys) {
+      ctx.fillStyle = b.kind === 'port' ? '#ff4d4d' : b.kind === 'starboard' ? '#3fd16b' : b.kind === 'special' ? '#ffd23f' : b.kind === 'safe' ? '#fff' : '#f6c718';
+      ctx.fillRect(mx(b.x) - 1, my(b.y) - 1, 2.5, 2.5);
+    }
+    ctx.fillStyle = '#ffffff';
+    for (const vs of scene.vessels) ctx.fillRect(mx(vs.x) - 1.5, my(vs.y) - 1.5, 3, 3);
+    for (const m of marks) if (m.active) { ctx.fillStyle = '#ff8c1a'; ctx.beginPath(); ctx.arc(mx(m.x), my(m.y), 3, 0, Math.PI * 2); ctx.fill(); }
+    ctx.translate(mx(s.x), my(s.y));
+    ctx.rotate(s.heading);
+    ctx.fillStyle = '#ffeb3b';
+    ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(3.5, 4); ctx.lineTo(-3.5, 4); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.strokeRect(ox, oy, bw * sc, bh * sc);
   }
 
   private toScreen(v: View, x: number, y: number): [number, number] {
@@ -198,7 +440,7 @@ export class Renderer {
     }
   }
 
-  private drawOffscreen(v: View, m: Mark, s: BoatState): void {
+  private drawOffscreen(v: View, m: Mark, s: BoatState, color = 'rgba(255,140,26,0.95)'): void {
     const { ctx } = v;
     const [x, y] = this.toScreen(v, m.x, m.y);
     const pad = 28;
@@ -211,7 +453,7 @@ export class Renderer {
     ctx.save();
     ctx.translate(ex, ey);
     ctx.rotate(ang);
-    ctx.fillStyle = 'rgba(255,140,26,0.95)';
+    ctx.fillStyle = color;
     ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-6, -9); ctx.lineTo(-6, 9); ctx.closePath(); ctx.fill();
     ctx.restore();
     const d = Math.hypot(m.x - s.x, m.y - s.y);
@@ -272,7 +514,8 @@ export class Renderer {
     ctx.stroke();
 
     // crew (two heads) on the crew side
-    const crewX = s.crewSide * (0.15 + 0.75 * c.hike) * (B / 2 + 0.25 * k * c.hike);
+    const p = s.crewPos;
+    const crewX = p * (B * 0.42 + 0.35 * k * Math.abs(p));
     ctx.fillStyle = '#e0552f';
     ctx.strokeStyle = '#222';
     ctx.lineWidth = 1;
@@ -360,4 +603,56 @@ function shade(hex: string, amt: number): string {
   const n = parseInt(hex.slice(1), 16);
   const f = (c: number) => Math.max(0, Math.min(255, Math.round(c * (1 + amt))));
   return `rgb(${f((n >> 16) & 255)},${f((n >> 8) & 255)},${f(n & 255)})`;
+}
+
+const LIGHT_COLOR: Record<Light['color'], string> = { white: '#fffbe6', red: '#ff3b3b', green: '#39ff6a', yellow: '#ffd23f' };
+
+/** Small side-view buoy icon standing on the water at (x, y), as on a chart or seen from the boat. */
+export function drawBuoyIcon(ctx: CanvasRenderingContext2D, x: number, y: number, kind: BuoyKind, hgt: number): void {
+  const Y = '#f6c718', K = '#1b1b1b', R = '#d7262e', G = '#1f9a48', W = '#ffffff';
+  const bodyH = hgt * 0.55, bodyW = hgt * 0.42;
+  const top = y - bodyH;
+  const bands: Record<BuoyKind, string[]> = {
+    port: [R], starboard: [G], north: [K, Y], east: [K, Y, K], south: [Y, K], west: [Y, K, Y],
+    isolated: [K, R, K], safe: [R, W, R, W], special: [Y],
+  };
+  ctx.save();
+  ctx.strokeStyle = '#111';
+  ctx.lineWidth = 1;
+  // body
+  const path = () => {
+    ctx.beginPath();
+    if (kind === 'starboard') { ctx.moveTo(x, top); ctx.lineTo(x + bodyW / 2, y); ctx.lineTo(x - bodyW / 2, y); }
+    else if (kind === 'port') { ctx.rect(x - bodyW / 2.4, top, bodyW / 1.2, bodyH); }
+    else { ctx.moveTo(x - bodyW / 3, top); ctx.lineTo(x + bodyW / 3, top); ctx.lineTo(x + bodyW / 2, y); ctx.lineTo(x - bodyW / 2, y); }
+    ctx.closePath();
+  };
+  path();
+  ctx.save();
+  ctx.clip();
+  const bs = bands[kind];
+  if (kind === 'safe') bs.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(x - bodyW / 2 + (i * bodyW) / bs.length, top, bodyW / bs.length + 0.5, bodyH); });
+  else bs.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(x - bodyW, top + (i * bodyH) / bs.length, bodyW * 2, bodyH / bs.length + 0.5); });
+  ctx.restore();
+  path();
+  ctx.stroke();
+  // topmark
+  const pole = top - hgt * 0.12;
+  ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, pole); ctx.stroke();
+  const t = hgt * 0.16;
+  const up = (cy: number, col: string) => { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x, cy - t); ctx.lineTo(x + t * 0.75, cy); ctx.lineTo(x - t * 0.75, cy); ctx.closePath(); ctx.fill(); };
+  const down = (cy: number, col: string) => { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x, cy + t); ctx.lineTo(x + t * 0.75, cy); ctx.lineTo(x - t * 0.75, cy); ctx.closePath(); ctx.fill(); };
+  const ball = (cy: number, col: string) => { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, cy, t * 0.5, 0, Math.PI * 2); ctx.fill(); };
+  switch (kind) {
+    case 'port': ctx.fillStyle = R; ctx.fillRect(x - t * 0.5, pole - t, t, t); break;
+    case 'starboard': up(pole, G); break;
+    case 'north': up(pole, K); up(pole - t * 1.1, K); break;
+    case 'south': down(pole - t * 2.1, K); down(pole - t, K); break;
+    case 'east': up(pole - t * 1.2, K); down(pole - t * 1.1, K); break;
+    case 'west': down(pole - t * 2.2, K); up(pole, K); break;
+    case 'isolated': ball(pole - t * 0.5, K); ball(pole - t * 1.6, K); break;
+    case 'safe': ball(pole - t * 0.5, R); break;
+    case 'special': ctx.strokeStyle = Y; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x - t * 0.5, pole - t); ctx.lineTo(x + t * 0.5, pole); ctx.moveTo(x + t * 0.5, pole - t); ctx.lineTo(x - t * 0.5, pole); ctx.stroke(); break;
+  }
+  ctx.restore();
 }

@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { initialState, step, DEG, pointOfSail, tackOf, apparentWind, type Controls } from '../src/sim/physics';
+import { initialState, step, switchSide, DEG, pointOfSail, tackOf, apparentWind, type Controls } from '../src/sim/physics';
+import { steadySpeed } from './trim';
 import { bestSpeed } from './polar';
 
 const WIND = { from: 0, speed: 4.4 }; // force 3 from the north
 
 function sail(heading: number, c: Partial<Controls>, seconds: number, wind = WIND, hold = false) {
-  const s = initialState(heading, 0, 0, 1.5);
+  const s = initialState(heading, 0, 0, 1.5, 0);
   const ctl: Controls = { tiller: 0, main: 0.6, jib: 0.6, hike: 0, board: 1, ...c };
   const events: string[] = [];
   let t;
@@ -59,8 +60,8 @@ describe('physics', () => {
     expect(events).toContain('tack');
   });
 
-  it('overpowered without hiking in force 5 capsizes if you hold the course', () => {
-    const { s } = sail(50 * DEG, { main: 1, jib: 1, hike: 0 }, 20, { from: 0, speed: 9.3 }, true);
+  it('overpowered without hiking in force 6 capsizes if you hold the course', () => {
+    const { s } = sail(60 * DEG, { main: 0.85, jib: 0.85, hike: 0 }, 20, { from: 0, speed: 11 }, true);
     expect(s.capsized).toBe(true);
   });
 
@@ -93,5 +94,40 @@ describe('physics', () => {
     const { twa } = apparentWind(s, WIND);
     expect(twa).toBeLessThan(0);
     expect(tackOf(s, twa)).toBe('port');
+  });
+
+  it('sheets in the middle only suit a beam reach', () => {
+    const best = (twa: number) => Math.max(...[0, 0.25, 0.5, 0.75, 1].map((m) => steadySpeed(twa, m)));
+    expect(steadySpeed(45, 0.5)).toBeLessThan(0.3); // luffing close-hauled
+    expect(steadySpeed(90, 0.5)).toBeGreaterThan(0.9 * best(90));
+    expect(steadySpeed(120, 0.5)).toBeLessThan(0.8 * best(120));
+    expect(steadySpeed(180, 0.5)).toBeLessThan(0.7 * best(180));
+    expect(steadySpeed(180, 1)).toBeLessThan(0.4 * best(180));
+  });
+
+  it('forgetting to change sides after a tack: crew to leeward, backed jib, slower', () => {
+    const run = (switched: boolean) => {
+      const s = initialState(-50 * DEG, 0, 0, 1.5, 0); // starboard tack
+      if (!switched) { s.heading = 50 * DEG; } else { s.heading = 50 * DEG; switchSide(s); }
+      let t;
+      for (let i = 0; i < 15 * 120; i++) { s.heading = 50 * DEG; s.r = 0; t = step(s, { tiller: 0, main: 0.9, jib: 0.9, board: 1 }, WIND, 1 / 120).t; }
+      return { s, t: t! };
+    };
+    const good = run(true), bad = run(false);
+    expect(good.t.jib.state).not.toBe('backed');
+    expect(bad.t.jib.state).toBe('backed');
+    expect(bad.t.crewLeeward).toBe(true);
+    expect(bad.s.u).toBeLessThan(good.s.u * 0.8);
+    expect(Math.abs(bad.s.heel)).toBeGreaterThan(Math.abs(good.s.heel));
+  });
+
+  it('a backed jib pushes the bow off the wind when in irons', () => {
+    const turn = (backed: boolean) => {
+      const s = initialState(-8 * DEG, 0, 0, 0, 0); // wind 8° on the starboard bow, jib to port
+      if (backed) s.jibSide = 1; // sheet the jib to windward
+      for (let i = 0; i < 4 * 120; i++) step(s, { tiller: 0, main: 0.3, jib: 1, board: 1 }, WIND, 1 / 120);
+      return -s.heading; // bearing away = turning to port = heading decreasing
+    };
+    expect(turn(true)).toBeGreaterThan(turn(false) + 5 * DEG);
   });
 });

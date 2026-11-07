@@ -13,8 +13,8 @@ export interface Controls {
   main: number;
   /** Jib sheet 0..1, 1 = sheeted fully in. */
   jib: number;
-  /** Crew hiking 0..1 (0 = sitting on the centreline, 1 = fully hiked out). */
-  hike: number;
+  /** Crew hiking 0..1 (0 = on the centreline, 1 = fully hiked out). Omit for an automatic crew. */
+  hike?: number;
   /** Centreboard 0..1 (1 = fully down). */
   board: number;
 }
@@ -40,16 +40,26 @@ export interface BoatState {
   boom: number;
   /** Jib clew angle, same convention as boom. */
   jibAngle: number;
-  /** Side the crew sits on: +1 starboard, -1 port. */
+  /** Side the crew sits on: +1 starboard, -1 port. Changed only by switchSide(). */
   crewSide: number;
+  /** Crew lateral position −1..1 (fraction of full hiking lever, + = starboard). Moves towards crewSide. */
+  crewPos: number;
+  /** Side the working jib sheet is on (+1 starboard, −1 port). Changed only by switchSide(). */
+  jibSide: number;
+  /** Heeling moment of the sails at the last step (used by the automatic crew). */
+  sailMoment: number;
   capsized: boolean;
 }
+
+/** What a sail is doing right now. */
+export type SailState = 'ok' | 'luffing' | 'over' | 'backed' | 'blanketed' | 'goosewing';
 
 export interface SailInfo {
   /** Angle of attack, rad (0..π). */
   aoa: number;
   luffing: boolean;
   stalled: boolean;
+  state: SailState;
   drive: number;
   side: number;
 }
@@ -69,6 +79,11 @@ export interface Telemetry {
   heelTarget: number;
   /** Heeling moment from the sails alone, N·m (positive = to starboard). */
   sailHeelMoment: number;
+  /** Crew is on the leeward side (forgot to change sides after a tack or gybe). */
+  crewLeeward: boolean;
+  /** Ideal sail angle from the centreline for the current apparent wind (rad). */
+  idealBoom: number;
+  idealJib: number;
 }
 
 export type SimEvent = 'tack' | 'gybe' | 'crashGybe' | 'capsize';
@@ -102,8 +117,23 @@ export const wrap = (a: number) => {
 
 const clamp = (x: number, lo: number, hi: number) => (x < lo ? lo : x > hi ? hi : x);
 
-export function initialState(heading: number, x = 0, y = 0, speed = 0): BoatState {
-  return { x, y, heading, u: speed, v: 0, r: 0, heel: 0, boom: 0, jibAngle: 0, crewSide: 1, capsized: false };
+/** Boat with crew on the windward side and sails to leeward for wind from `windFrom`. */
+export function initialState(heading: number, x = 0, y = 0, speed = 0, windFrom = 0): BoatState {
+  const windSide = wrap(windFrom - heading) >= 0 ? 1 : -1;
+  return {
+    x, y, heading, u: speed, v: 0, r: 0, heel: 0,
+    boom: -windSide * 0.1, jibAngle: -windSide * 0.1,
+    crewSide: windSide, crewPos: windSide * 0.2, jibSide: -windSide, sailMoment: 0, capsized: false,
+  };
+}
+
+/**
+ * «Смена борта»: the crew moves to the other side and the jib sheet is transferred.
+ * Must be done on every tack and gybe; the mainsail swings across by itself.
+ */
+export function switchSide(s: BoatState): void {
+  s.crewSide = -s.crewSide;
+  s.jibSide = -s.jibSide;
 }
 
 /** Lift and drag coefficients of a soft sail as a function of angle of attack (rad). */
@@ -113,12 +143,13 @@ export function sailCoefficients(aoa: number): { cl: number; cd: number } {
   // A soft sail only starts to fill above ~6° (below that the luff flaps).
   if (a <= 6) cl = 0.25 * (a / 6);
   else if (a <= 24) cl = 0.25 + 1.2 * ((a - 6) / 18);
-  else if (a <= 45) cl = 1.45 - ((a - 24) / 21) * 0.45;
-  else if (a <= 90) cl = 1.0 * Math.cos(((a - 45) / 45) * (Math.PI / 2));
+  else if (a <= 34) cl = 1.45 - ((a - 24) / 10) * 0.7; // stall: flow separates from the lee side
+  else if (a <= 90) cl = 0.75 * Math.cos(((a - 34) / 56) * (Math.PI / 2));
   else cl = 0;
   const s = Math.sin(Math.min(aoa, Math.PI));
-  // profile drag + induced drag (aspect ratio ≈ 3) + flapping drag
-  const cd = 0.05 + 1.15 * s * s + 0.11 * cl * cl + (a < 7 ? 0.05 : 0);
+  // profile drag + induced drag (aspect ratio ≈ 3) + flapping drag.
+  // Past 90° (wind from behind) only the projected area pushes: sin³ makes an over-sheeted sail on a run weak.
+  const cd = 0.05 + (a <= 90 ? 1.0 * s * s : 1.1 * s * s * s) + 0.11 * cl * cl + (a < 7 ? 0.05 : 0);
   return { cl, cd };
 }
 
@@ -138,7 +169,19 @@ function sailForce(awa: number, aws: number, sailAngle: number, area: number): S
   const lf = sign * -ds, ls = sign * df;
   const drive = q * (cl * lf + cd * df);
   const side = q * (cl * ls + cd * ds);
-  return { aoa, luffing: aoa < 7 * DEG, stalled: aoa > 32 * DEG && aoa < 75 * DEG, drive, side };
+  return { aoa, luffing: aoa < 7 * DEG, stalled: aoa > 30 * DEG && aoa < 90 * DEG, state: 'ok', drive, side };
+}
+
+/** Best sail angle from the centreline for an apparent wind angle (both rad, positive). */
+export function idealSailAngle(absAwa: number, min: number, max: number): number {
+  return clamp(absAwa - 18 * DEG, min, max);
+}
+
+function classify(info: SailInfo, angle: number, ideal: number, side: number, windSide: number, absAwa: number): SailState {
+  if (side === windSide) return absAwa > 150 * DEG ? 'goosewing' : 'backed';
+  if (info.luffing) return 'luffing';
+  if (Math.abs(angle) < ideal - 14 * DEG) return 'over';
+  return 'ok';
 }
 
 export function apparentWind(s: BoatState, w: Wind): { awa: number; aws: number; twa: number } {
@@ -188,7 +231,12 @@ export function step(s: BoatState, c: Controls, w: Wind, dt: number): { t: Telem
       events.push('tack');
     }
   }
-  const jibTarget = -windSide * Math.min(jibLimit, absAwa);
+  // The jib stays on the side of its working sheet. On the leeward side it swings out up to the sheet limit;
+  // sheeted on the windward side it is backed (or goose-winged on a run) and held by the sheet.
+  const jibLeeward = s.jibSide === -windSide;
+  const jibTarget = jibLeeward
+    ? s.jibSide * Math.min(jibLimit, absAwa)
+    : s.jibSide * (absAwa > 150 * DEG ? jibLimit : Math.min(jibLimit, 22 * DEG));
   s.jibAngle += clamp((jibTarget - s.jibAngle) * 10 * dt, -6 * dt, 6 * dt);
 
   // --- Aerodynamic forces ---
@@ -197,8 +245,21 @@ export function step(s: BoatState, c: Controls, w: Wind, dt: number): { t: Telem
   const jibF = sailForce(awa, aws, s.jibAngle, BOAT.jibArea * cosHeel);
   // On a run the jib is blanketed by the mainsail.
   const blanket = absAwa > 140 * DEG ? 1 - 0.7 * ((absAwa - 140 * DEG) / (40 * DEG)) : 1;
-  jibF.drive *= blanket;
-  jibF.side *= blanket;
+  if (jibLeeward) {
+    jibF.drive *= blanket;
+    jibF.side *= blanket;
+  }
+  const idealBoom = idealSailAngle(absAwa, BOAT.mainMin, BOAT.mainMax);
+  const idealJib = idealSailAngle(absAwa, BOAT.jibMin, BOAT.jibMax);
+  mainF.state = classify(mainF, s.boom, idealBoom, Math.sign(s.boom) || -windSide, windSide, absAwa);
+  if (mainF.state === 'goosewing' || mainF.state === 'backed') mainF.state = absAwa > 150 * DEG ? 'ok' : mainF.state; // by the lee
+  jibF.state = classify(jibF, s.jibAngle, idealJib, s.jibSide, windSide, absAwa);
+  if (jibF.state !== 'backed' && jibF.state !== 'goosewing' && jibLeeward && blanket < 0.6) jibF.state = 'blanketed';
+  // Over-sheeted sails stall: turbulent flow gives much less drive (the side force and heel stay).
+  for (const [f, angle, ideal] of [[mainF, s.boom, idealBoom], [jibF, s.jibAngle, idealJib]] as const) {
+    const over = ideal - Math.abs(angle);
+    if (over > 10 * DEG && f.drive > 0 && f.state !== 'backed') f.drive *= 1 - 0.65 * clamp((over - 10 * DEG) / (45 * DEG), 0, 1);
+  }
 
   // --- Hydrodynamics ---
   const board = clamp(c.board, 0, 1);
@@ -211,7 +272,7 @@ export function step(s: BoatState, c: Controls, w: Wind, dt: number): { t: Telem
   const lateral = (520 * (0.12 + 0.88 * board) * Math.max(absU, 0.3)) * s.v + 120 * s.v * Math.abs(s.v) + 15 * s.v;
 
   // Windage of hull, crew and rig acts along the apparent wind flow.
-  const windage = 0.5 * BOAT.rho * aws * aws * 0.9;
+  const windage = 0.5 * BOAT.rho * aws * aws * 0.6;
   const Fx = mainF.drive + jibF.drive - resist - windage * Math.cos(awa);
   const Fy = mainF.side + jibF.side - lateral - windage * Math.sin(awa);
 
@@ -219,10 +280,16 @@ export function step(s: BoatState, c: Controls, w: Wind, dt: number): { t: Telem
   s.u += (Fx / m + s.v * s.r) * dt;
   s.v += (Fy / (1.4 * m) - s.u * s.r) * dt;
 
-  // --- Heel ---
-  if (absAwa > 15 * DEG && absAwa < 165 * DEG && Math.sign(awa) !== s.crewSide) s.crewSide = windSide;
+  // --- Heel and crew ---
   const heelMoment = mainF.side * BOAT.mainCE + jibF.side * BOAT.jibCE;
-  const crewMoment = s.crewSide * BOAT.crewRighting * clamp(c.hike, 0, 1) * cosHeel;
+  s.sailMoment = heelMoment;
+  // Crew on the windward side hikes as needed; on the leeward side (forgot to change sides) it just sits there.
+  const crewLeeward = s.crewSide !== windSide && absAwa > 20 * DEG && absAwa < 160 * DEG;
+  const autoAmount = clamp((-s.crewSide * heelMoment - 0.08 * BOAT.stiffness) / BOAT.crewRighting, 0, 1);
+  const amount = crewLeeward ? 0.35 : c.hike ?? autoAmount;
+  const crewTarget = s.crewSide * Math.max(0.05, amount);
+  s.crewPos += clamp(crewTarget - s.crewPos, -1.4 * dt, 1.4 * dt); // crossing the boat takes ~1.5 s
+  const crewMoment = BOAT.crewRighting * s.crewPos * cosHeel;
   const heelTarget = (heelMoment + crewMoment) / BOAT.stiffness;
   s.heel += (heelTarget - s.heel) * 2.5 * dt;
 
@@ -234,7 +301,10 @@ export function step(s: BoatState, c: Controls, w: Wind, dt: number): { t: Telem
   // Without steerage way the wind blows the bow off (a boat in irons falls away by itself, slowly).
   const noWay = Math.max(0, 1 - Math.max(s.u, 0) / 1.0);
   const weathervane = -0.18 * Math.sign(twa) * (0.25 + Math.abs(Math.sin(twa))) * Math.min(1.5, w.speed / 5) * noWay;
-  const rTarget = steer + helm + weathervane;
+  // Sail balance: the jib (ahead of the centreboard) pushes the bow away from its side force,
+  // the mainsail (behind it) pushes the stern. Easing the main bears away; a backed jib turns the bow.
+  const sailYaw = 0.0015 * jibF.side - 0.00065 * mainF.side;
+  const rTarget = steer + helm + weathervane + sailYaw;
   s.r += (rTarget - s.r) * 2.5 * dt;
   s.heading = wrap(s.heading + s.r * dt);
 
@@ -256,6 +326,9 @@ export function step(s: BoatState, c: Controls, w: Wind, dt: number): { t: Telem
       leeway: Math.atan2(s.v, Math.max(Math.abs(s.u), 0.01)),
       heelTarget,
       sailHeelMoment: heelMoment,
+      crewLeeward,
+      idealBoom,
+      idealJib,
     },
     events,
   };

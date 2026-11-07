@@ -11,10 +11,9 @@ interface Question {
   explain: HTMLElement | string;
 }
 
-type QuizType = 'ru_en' | 'en_ru' | 'def' | 'sign' | 'situation' | 'command';
+type QuizType = 'en_ru' | 'def' | 'sign' | 'situation' | 'command';
 
 const TYPES: { id: QuizType; ru: string }[] = [
-  { id: 'ru_en', ru: 'Перевод RU → EN' },
   { id: 'en_ru', ru: 'Перевод EN → RU' },
   { id: 'def', ru: 'Определение → термин' },
   { id: 'sign', ru: 'Знаки и сигналы' },
@@ -42,12 +41,6 @@ function poolFor(c: Card, all: Card[]): Card[] {
 
 function make(type: QuizType): Question {
   switch (type) {
-    case 'ru_en': {
-      const c = pick([...terms, ...CARDS.filter((x) => x.kind === 'command')]);
-      const { opts, answer } = options(c, poolFor(c, terms), (x) => x.en);
-      return { prompt: h('div', null, h('div', { class: 'muted small' }, 'Как по-английски?'), h('div', { class: 'big' }, c.ru)),
-        options: opts.map((o) => h('span', { lang: 'en' }, o.en)), answer, explain: `${c.ru} — ${c.en}. ${c.defRu}` };
-    }
     case 'en_ru': {
       const c = pick(terms);
       const { opts, answer } = options(c, poolFor(c, terms), (x) => x.ru);

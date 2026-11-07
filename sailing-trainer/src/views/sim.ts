@@ -1,40 +1,41 @@
 import { h, clear } from '../lib/dom';
 import { settings, saveSettings, load, save } from '../lib/store';
 import {
-  initialState, step, autoHike, windAt, pointOfSail, tackOf, DEG, BEAUFORT_MS,
-  POINT_OF_SAIL_RU, POINT_OF_SAIL_EN, type BoatState, type Controls, type Telemetry, type WindModel, type SimEvent,
+  initialState, step, switchSide, windAt, pointOfSail, tackOf, DEG, BEAUFORT_MS,
+  POINT_OF_SAIL_RU, type BoatState, type Controls, type Telemetry, type WindModel, type SimEvent,
 } from '../sim/physics';
 import { Renderer, type Mark } from '../sim/render';
 import { MISSIONS, MISSION_BY_ID, type MissionDef, type MissionRuntime } from '../sim/missions';
-import { hints } from '../sim/hints';
+import { hints, SAIL_STATE_RU } from '../sim/hints';
+import { createWorld, isBlocked, type World } from '../sim/world';
+import { Traffic, TRAFFIC_RU } from '../sim/traffic';
 
 interface SimPrefs {
-  autoHike: boolean;
   linkJib: boolean;
   showNoGo: boolean;
   freeBft: number;
   freeGusts: boolean;
+  freeWorld: boolean;
+  freeTraffic: number;
+  freeNight: boolean;
 }
 
-const EVENT_TEXT: Partial<Record<SimEvent, string>> = {
-  tack: 'Поворот оверштаг',
-  gybe: 'Поворот фордевинд',
-  crashGybe: 'Неконтролируемый поворот фордевинд! Перед поворотом подберите грота-шкот.',
-};
-
-const KEYS_HELP = [
-  ['← →', 'румпель'], ['↑ ↓', 'грота-шкот (выбрать / потравить)'], ['W S', 'стаксель-шкот'],
-  ['Q A', 'откренивание'], ['C', 'шверт'], ['Пробел', 'пауза'], ['R', 'заново'],
+const KEYS_HELP: [string, string][] = [
+  ['A / D', 'румпель'], ['↑ ↓', 'грота-шкот'], ['W S', 'стаксель-шкот'], ['Enter', 'смена борта'], ['Пробел', 'пауза'], ['R', 'заново'],
 ];
 
+type Hold = 'away' | 'toward' | 'mainIn' | 'mainOut' | 'jibIn' | 'jibOut';
+
 export function simView(root: HTMLElement, params: URLSearchParams): () => void {
-  const prefs: SimPrefs = load('simPrefs', { autoHike: true, linkJib: true, showNoGo: true, freeBft: 3, freeGusts: true });
+  const prefs: SimPrefs = load('simPrefs', { linkJib: true, showNoGo: true, freeBft: 3, freeGusts: true, freeWorld: true, freeTraffic: 1, freeNight: false });
   const savePrefs = () => save('simPrefs', prefs);
+  const simple = () => settings.steerMode === 'bow';
 
   let mission: MissionDef = MISSION_BY_ID[params.get('m') ?? ''] ?? MISSIONS[0];
   let runtime: MissionRuntime;
   let s: BoatState;
-  const c: Controls = { tiller: 0, main: 0.5, jib: 0.5, hike: 0, board: 1 };
+  const c: Controls = { tiller: 0, main: 0.5, jib: 0.5, board: 1 };
+  let tillerCmd = 0; // −1..1, + = "от себя" (or "привестись" in simple mode)
   let windModel: WindModel;
   let tel: Telemetry | null = null;
   let time = 0;
@@ -43,6 +44,12 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   let counters = { tacks: 0, gybes: 0, crashGybes: 0 };
   let zoom = 1;
   let lastWind = { from: 0, speed: 0, gust: 0 };
+  let world: World | null = null;
+  let traffic: Traffic | null = null;
+  let night = false;
+  let safeTrail: { x: number; y: number; heading: number }[] = [];
+  let safeTimer = 0;
+  const held = new Set<Hold>();
 
   // ---------- DOM ----------
   const canvas = h('canvas');
@@ -64,62 +71,64 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     missionSel,
     h('button', { class: 'btn secondary small', title: 'Заново (R)', onClick: () => reset(true) }, '⟳'),
     pauseBtn,
-    h('button', { class: 'btn secondary small', title: 'Отдалить', onClick: () => (zoom = Math.max(0.4, zoom / 1.25)) }, '−'),
+    h('button', { class: 'btn secondary small', title: 'Отдалить', onClick: () => (zoom = Math.max(0.3, zoom / 1.25)) }, '−'),
     h('button', { class: 'btn secondary small', title: 'Приблизить', onClick: () => (zoom = Math.min(3, zoom * 1.25)) }, '+'),
     h('button', { class: 'btn secondary small', title: 'Настройки', onClick: () => showSettings() }, '⚙'),
-    h('span', { class: 'keys' }, KEYS_HELP.slice(0, 5).map(([k, t]) => h('span', { style: { marginRight: '8px' } }, h('kbd', null, k), ' ', t))),
+    h('span', { class: 'keys' }, KEYS_HELP.map(([k, t]) => h('span', { style: { marginRight: '8px' } }, h('kbd', null, k), ' ', t))),
   );
 
-  // Controls
-  const tillerIn = h('input', { type: 'range', min: '-100', max: '100', value: '0', 'aria-label': 'Румпель' });
-  const tillerEnds = h('div', { class: 'ends' });
-  const mainIn = h('input', { type: 'range', min: '0', max: '100', value: '50', 'aria-label': 'Грота-шкот' });
-  const jibIn = h('input', { type: 'range', min: '0', max: '100', value: '50', 'aria-label': 'Стаксель-шкот' });
-  const hikeIn = h('input', { type: 'range', min: '0', max: '100', value: '0', 'aria-label': 'Откренивание' });
-  const tillerLbl = h('span');
-  const mainLbl = h('span'), jibLbl = h('span'), hikeLbl = h('span');
-  const linkCb = h('input', { type: 'checkbox', checked: prefs.linkJib });
-  const autoCb = h('input', { type: 'checkbox', checked: prefs.autoHike });
-  linkCb.addEventListener('change', () => { prefs.linkJib = linkCb.checked; savePrefs(); });
-  autoCb.addEventListener('change', () => { prefs.autoHike = autoCb.checked; savePrefs(); });
-  const boardSeg = h('div', { class: 'seg' });
-  const boardOpts: [number, string][] = [[1, 'Опущен'], [0.5, 'Наполовину'], [0.1, 'Поднят']];
-  const drawBoard = () => {
-    clear(boardSeg);
-    for (const [v, l] of boardOpts) boardSeg.append(h('button', { class: Math.abs(c.board - v) < 0.01 ? 'on' : '', onClick: () => { c.board = v; drawBoard(); } }, l));
+  /** A button that acts while it is held down (mouse or touch). */
+  const holdBtn = (hold: Hold, label: () => [string, string], cls = '') => {
+    const b = h('button', { class: `hold ${cls}` });
+    const update = () => { const [text, key] = label(); clear(b); b.append(text, h('span', { class: 'kh' }, ` (${key})`)); };
+    update();
+    const on = (e: Event) => { e.preventDefault(); held.add(hold); nudge(hold); b.classList.add('down'); };
+    const off = () => { held.delete(hold); b.classList.remove('down'); };
+    b.addEventListener('pointerdown', on);
+    b.addEventListener('pointerup', off);
+    b.addEventListener('pointerleave', off);
+    b.addEventListener('pointercancel', off);
+    b.addEventListener('contextmenu', (e) => e.preventDefault());
+    return { el: b, update };
   };
+  const awayBtn = holdBtn('away', () => [simple() ? '⤴ Привестись' : '◀ От себя', 'A']);
+  const towardBtn = holdBtn('toward', () => [simple() ? 'Увалиться ⤵' : 'К себе ▶', 'D']);
+  const mainOut = holdBtn('mainOut', () => ['Потравить', '↓']);
+  const mainIn = holdBtn('mainIn', () => ['Выбрать', '↑']);
+  const jibOut = holdBtn('jibOut', () => ['Потравить', 'S']);
+  const jibIn = holdBtn('jibIn', () => ['Выбрать', 'W']);
+  const tillerInfo = h('div', { class: 'ctl-val' });
+  const mainInfo = h('div', { class: 'ctl-val' });
+  const jibInfo = h('div', { class: 'ctl-val' });
+  const linkCb = h('input', { type: 'checkbox', checked: prefs.linkJib });
+  linkCb.addEventListener('change', () => { prefs.linkJib = linkCb.checked; savePrefs(); syncJibButtons(); });
+  const syncJibButtons = () => { jibIn.el.disabled = jibOut.el.disabled = prefs.linkJib; };
+  syncJibButtons();
+  const sideBtn = h('button', { class: 'btn side-btn', onClick: () => doSwitch() }, '⇄ Смена борта (Enter)');
+  const stateBox = h('div', { class: 'sail-state' });
 
-  let draggingTiller = false;
-  const tillerSign = () => (settings.steerMode === 'bow' ? -1 : 1);
-  tillerIn.addEventListener('input', () => { c.tiller = (Number(tillerIn.value) / 100) * tillerSign(); });
-  tillerIn.addEventListener('pointerdown', () => (draggingTiller = true));
-  const releaseTiller = () => { draggingTiller = false; };
-  tillerIn.addEventListener('pointerup', releaseTiller);
-  tillerIn.addEventListener('pointercancel', releaseTiller);
-  mainIn.addEventListener('input', () => { c.main = Number(mainIn.value) / 100; });
-  jibIn.addEventListener('input', () => { c.jib = Number(jibIn.value) / 100; linkCb.checked = prefs.linkJib = false; savePrefs(); });
-  hikeIn.addEventListener('input', () => { c.hike = Number(hikeIn.value) / 100; autoCb.checked = prefs.autoHike = false; savePrefs(); });
-
-  const ctl = (label: string, val: HTMLElement, input: HTMLElement, ends: HTMLElement | null, extra?: HTMLElement) =>
-    h('div', { class: 'ctl' }, h('label', null, h('span', null, label), val), input, ends, extra);
-  const controls = h('div', { class: 'controls' },
-    ctl('Румпель', tillerLbl, tillerIn, tillerEnds),
-    ctl('Грота-шкот', mainLbl, mainIn, h('div', { class: 'ends' }, h('span', null, '◀ потравить'), h('span', null, 'выбрать ▶'))),
-    ctl('Стаксель-шкот', jibLbl, jibIn, h('div', { class: 'ends' }, h('span', null, '◀ потравить'), h('span', null, 'выбрать ▶')),
-      h('label', { class: 'small row' }, linkCb, 'вместе с гротом')),
-    ctl('Откренивание', hikeLbl, hikeIn, h('div', { class: 'ends' }, h('span', null, '◀ сидим в лодке'), h('span', null, 'висим ▶')),
-      h('label', { class: 'small row' }, autoCb, 'автоматически')),
-    h('div', { class: 'ctl' }, h('label', null, h('span', null, 'Шверт (C)')), boardSeg),
+  const row = (cls: string, label: string, a: HTMLElement, mid: HTMLElement, b: HTMLElement, extra?: HTMLElement) =>
+    h('div', { class: `ctl-row ${cls}` }, h('div', { class: 'ctl-name' }, label, extra), a, mid, b);
+  const controls = h('div', { class: 'controls2' },
+    row('r-tiller', 'Румпель', awayBtn.el, tillerInfo, towardBtn.el),
+    row('r-main', 'Грот', mainOut.el, mainInfo, mainIn.el),
+    row('r-jib', 'Стаксель', jibOut.el, jibInfo, jibIn.el, h('label', { class: 'link' }, linkCb, ' с гротом')),
+    h('div', { class: 'ctl-row side-row' }, sideBtn, stateBox),
   );
 
   root.append(h('div', { class: 'sim' }, bar, stage, controls));
 
   // ---------- Simulation ----------
   function reset(showIntro: boolean): void {
-    const st = mission.start;
-    s = initialState(st.heading, st.x, st.y, st.speed);
-    c.tiller = 0; c.main = st.main; c.jib = st.main; c.hike = 0; c.board = 1;
     const isFree = mission.id === 'free';
+    world = mission.world || (isFree && prefs.freeWorld) ? createWorld() : null;
+    night = !!mission.night || (isFree && prefs.freeNight);
+    const tcount = mission.traffic ?? (isFree ? prefs.freeTraffic : 0);
+    traffic = tcount > 0 ? new Traffic(tcount, world) : null;
+    const st = isFree && world ? { ...mission.start, x: 20, y: 0 } : mission.start;
+    s = initialState(st.heading, st.x, st.y, st.speed, 0);
+    c.tiller = 0; c.main = st.main; c.jib = st.main;
+    tillerCmd = 0;
     const bft = isFree ? prefs.freeBft : mission.beaufort;
     windModel = {
       base: { from: 0, speed: BEAUFORT_MS[bft] ?? 4.4 },
@@ -132,17 +141,19 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     finished = false;
     counters = { tacks: 0, gybes: 0, crashGybes: 0 };
     tel = null;
+    safeTrail = [{ x: s.x, y: s.y, heading: s.heading }];
     renderer.reset();
     renderer.showNoGo = prefs.showNoGo;
-    // settle sail positions
+    zoom = night ? 0.3 : world ? 0.6 : traffic ? 0.7 : 1;
+    // Let the sails settle into position before the start.
     for (let i = 0; i < 60; i++) {
-      const sv = { ...s };
-      step(s, c, windAt(windModel, 0), 1 / 60);
-      Object.assign(s, { x: sv.x, y: sv.y, heading: sv.heading, u: sv.u, v: 0, r: 0, heel: 0 });
+      const keep = { x: s.x, y: s.y, heading: s.heading, u: s.u };
+      tel = step(s, c, windAt(windModel, 0), 1 / 60).t;
+      Object.assign(s, keep, { v: 0, r: 0, heel: 0 });
     }
-    drawBoard();
-    syncInputs(true);
-    if (showIntro) intro(); else { overlay.style.display = 'none'; paused = false; }
+    held.clear();
+    awayBtn.update(); towardBtn.update();
+    if (showIntro) intro(); else { overlay.style.display = 'none'; paused = false; pauseBtn.textContent = '⏸'; }
   }
 
   function intro(): void {
@@ -156,9 +167,13 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       h('p', null, mission.descRu),
       h('p', { class: 'small muted' }, `Ветер: ${bft} балла по Бофорту (~${Math.round(BEAUFORT_MS[bft] * 1.944)} уз), дует с севера — сверху экрана.`),
       h('ul', { class: 'small' },
-        h('li', null, 'Румпель в одну сторону — нос в другую. Румпель «от себя» (под ветер) — привестись, «к себе» (на ветер) — увалиться.'),
-        h('li', null, 'Следите за подсказками внизу: заполаскивание, перетянутые паруса, крен, мёртвая зона.'),
-        h('li', null, 'Красный сектор — мёртвая зона, пунктир — курсы крутого бейдевинда.')),
+        h('li', null, simple()
+          ? 'Румпель: «Привестись» — нос к ветру, «Увалиться» — нос от ветра.'
+          : 'Румпель: «От себя» (под ветер) — лодка приводится к ветру; «К себе» (на ветер) — уваливается. Рулевой сидит на наветренном борту.'),
+        h('li', null, 'Шкоты: «Выбрать» — парус ближе к ДП, «Потравить» — дальше. Состояние парусов показано под кнопками.'),
+        h('li', null, 'После каждого поворота оверштаг или фордевинд — команда «Смена борта»: экипаж пересаживается, стаксель перекидывается на новый борт.'),
+        world ? h('li', null, 'Не выходите на берег и мели. Мини-карта справа — как картплоттер.') : null,
+        traffic ? h('li', null, 'Красный пунктир вокруг судна — уступаете вы; зелёный — уступают вам.') : null),
       h('p', { class: 'keys' }, KEYS_HELP.map(([k, t]) => h('span', { style: { marginRight: '10px', display: 'inline-block' } }, h('kbd', null, k), ' ', t))),
       h('button', { class: 'btn', onClick: () => { overlay.style.display = 'none'; paused = false; pauseBtn.textContent = '⏸'; } }, 'Старт'),
     ));
@@ -188,20 +203,43 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     ));
   }
 
+  /** In free sailing: show a message and offer to continue from a safe spot. */
+  function freeMishap(title: string, text: string, recover: () => void): void {
+    paused = true;
+    clear(overlay);
+    overlay.style.display = '';
+    overlay.append(h('div', { class: 'panel' },
+      h('h2', { style: { marginTop: '0' } }, title), h('p', null, text),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', onClick: () => { recover(); overlay.style.display = 'none'; paused = false; } }, 'Продолжить'),
+        h('a', { class: 'btn secondary', href: '#/maneuvers' }, 'Манёвры'))));
+  }
+
   function capsized(): void {
+    const text = 'Крен превысил предел. В порывах травите грота-шкот; после поворота не забывайте «Смену борта» — экипаж на подветренном борту кренит лодку.';
     if (mission.id === 'free') {
-      paused = true;
-      clear(overlay);
-      overlay.style.display = '';
-      overlay.append(h('div', { class: 'panel' },
-        h('h2', { style: { marginTop: '0' } }, 'Лодка опрокинулась!'),
-        h('p', null, 'Крен превысил предел. В порывах травите грота-шкот, откренивайтесь и немного приводитесь. Как ставить лодку — в разделе «Манёвры».'),
-        h('div', { class: 'row' },
-          h('button', { class: 'btn', onClick: () => { s.capsized = false; s.heel = 0; s.u = 0; s.v = 0; s.r = 0; c.main = 0.2; c.jib = 0.2; syncInputs(true); overlay.style.display = 'none'; paused = false; } }, 'Поставить лодку'),
-          h('a', { class: 'btn secondary', href: '#/maneuvers' }, 'Как поставить лодку'))));
-    } else {
-      finish(false, 'Лодка опрокинулась. В порывах травите грота-шкот и откренивайтесь; перед поворотом фордевинд подбирайте гик.');
-    }
+      freeMishap('Лодка опрокинулась!', text, () => { s.capsized = false; s.heel = 0; s.u = 0; s.v = 0; s.r = 0; c.main = 0.2; c.jib = 0.2; });
+    } else finish(false, `Лодка опрокинулась. ${text}`);
+  }
+
+  function grounded(kind: 'land' | 'shoal' | 'pontoon'): void {
+    const text = kind === 'shoal'
+      ? 'Сели на мель. Кардинальный знак показывает безопасную сторону: северный обходят с севера, южный — с юга, восточный — с востока, западный — с запада.'
+      : kind === 'pontoon' ? 'Удар о причал на скорости. Гасите ход заранее: последний отрезок — против ветра, паруса потравлены.'
+        : 'Выбросились на берег. Следите за береговой линией и мини-картой.';
+    if (mission.id === 'free') {
+      freeMishap(kind === 'shoal' ? 'Мель!' : 'Удар!', text, () => {
+        const p = safeTrail[0];
+        Object.assign(s, { x: p.x, y: p.y, heading: p.heading, u: 0, v: 0, r: 0, heel: 0 });
+        safeTrail = [p];
+      });
+    } else finish(false, text);
+  }
+
+  function doSwitch(): void {
+    if (paused || finished) return;
+    switchSide(s);
+    showToast(s.crewSide > 0 ? 'Смена борта: экипаж на правом борту' : 'Смена борта: экипаж на левом борту');
   }
 
   function showSettings(): void {
@@ -214,22 +252,28 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       i.addEventListener('change', () => fn(i.checked));
       return h('label', null, i, label);
     };
-    const bftSel = h('select', null, [1, 2, 3, 4, 5].map((b) => h('option', { value: String(b) }, `${b} балл${b === 1 ? '' : b < 5 ? 'а' : 'ов'} (~${Math.round(BEAUFORT_MS[b] * 1.944)} уз)`)));
-    bftSel.value = String(prefs.freeBft);
-    bftSel.addEventListener('change', () => { prefs.freeBft = Number(bftSel.value); savePrefs(); });
-    const steerSel = h('select', null, h('option', { value: 'tiller' }, '← → двигают румпель (как на лодке)'), h('option', { value: 'bow' }, '← → поворачивают нос (упрощённо)'));
-    steerSel.value = settings.steerMode;
-    steerSel.addEventListener('change', () => { settings.steerMode = steerSel.value as 'tiller' | 'bow'; saveSettings(); syncInputs(true); });
+    const sel = (label: string, opts: [string, string][], val: string, fn: (v: string) => void) => {
+      const el = h('select', null, opts.map(([v, t]) => h('option', { value: v }, t)));
+      el.value = val;
+      el.addEventListener('change', () => fn(el.value));
+      return h('div', null, h('div', { class: 'small muted' }, label), el);
+    };
     overlay.append(h('div', { class: 'panel' },
       h('h2', { style: { marginTop: '0' } }, 'Настройки'),
       h('div', { class: 'settings-grid' },
-        h('div', null, h('div', { class: 'small muted' }, 'Ветер в свободном плавании'), bftSel),
-        cb('Порывы и заходы ветра (свободное плавание)', prefs.freeGusts, (v) => { prefs.freeGusts = v; savePrefs(); }),
+        h('b', null, 'Свободное плавание'),
+        sel('Ветер', [1, 2, 3, 4, 5].map((b) => [String(b), `${b} балл${b === 1 ? '' : b < 5 ? 'а' : 'ов'} (~${Math.round(BEAUFORT_MS[b] * 1.944)} уз)`]), String(prefs.freeBft), (v) => { prefs.freeBft = Number(v); savePrefs(); }),
+        cb('Порывы и заходы ветра', prefs.freeGusts, (v) => { prefs.freeGusts = v; savePrefs(); }),
+        cb('Берег, марина, фарватер, знаки и маяки', prefs.freeWorld, (v) => { prefs.freeWorld = v; savePrefs(); }),
+        sel('Другие суда', [['0', 'нет'], ['1', '1 судно'], ['2', '2 судна'], ['3', '3 судна']], String(prefs.freeTraffic), (v) => { prefs.freeTraffic = Number(v); savePrefs(); }),
+        cb('Ночь (видны только огни)', prefs.freeNight, (v) => { prefs.freeNight = v; savePrefs(); }),
+        h('b', null, 'Общие'),
+        sel('Кнопки руля', [['tiller', 'От себя / К себе (как на лодке)'], ['bow', 'Привестись / Увалиться (упрощённо)']], settings.steerMode, (v) => {
+          settings.steerMode = v as 'tiller' | 'bow'; saveSettings(); awayBtn.update(); towardBtn.update();
+        }),
         cb('Показывать мёртвую зону', prefs.showNoGo, (v) => { prefs.showNoGo = v; renderer.showNoGo = v; savePrefs(); }),
-        h('div', null, h('div', { class: 'small muted' }, 'Управление с клавиатуры'), steerSel),
-        cb('Румпель возвращается в центр, если отпустить', settings.springTiller, (v) => { settings.springTiller = v; saveSettings(); }),
       ),
-      h('p', { class: 'small muted' }, 'Новые настройки ветра применяются после перезапуска задания.'),
+      h('p', { class: 'small muted' }, 'Настройки свободного плавания применяются после перезапуска.'),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onClick: () => { overlay.style.display = 'none'; paused = finished || wasPaused; pauseBtn.textContent = paused ? '▶' : '⏸'; } }, 'Закрыть'),
         h('button', { class: 'btn secondary', onClick: () => reset(true) }, 'Перезапустить')),
@@ -243,45 +287,55 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   }
 
   // ---------- Input ----------
-  const keys = new Set<string>();
+  const KEY_HOLD: Record<string, Hold> = {
+    a: 'away', ф: 'away', d: 'toward', в: 'toward',
+    ArrowUp: 'mainIn', ArrowDown: 'mainOut', w: 'jibIn', ц: 'jibIn', s: 'jibOut', ы: 'jibOut',
+  };
   const onKeyDown = (e: KeyboardEvent) => {
     if ((e.target as HTMLElement)?.tagName === 'SELECT') return;
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' '].includes(k)) e.preventDefault();
+    if (['ArrowUp', 'ArrowDown', ' ', 'Enter'].includes(k)) e.preventDefault();
     if (k === ' ') togglePause();
     else if (k === 'r' || k === 'к') reset(false);
-    else if (k === 'c' || k === 'с') { const i = boardOpts.findIndex(([v]) => Math.abs(v - c.board) < 0.01); c.board = boardOpts[(i + 1) % boardOpts.length][0]; drawBoard(); }
-    keys.add(k);
+    else if ((k === 'Enter' || k === 'b' || k === 'и') && !e.repeat) doSwitch();
+    const hold = KEY_HOLD[k];
+    if (hold && !held.has(hold)) { held.add(hold); nudge(hold); }
   };
-  const onKeyUp = (e: KeyboardEvent) => keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+  const onKeyUp = (e: KeyboardEvent) => {
+    const hold = KEY_HOLD[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+    if (hold) held.delete(hold);
+  };
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
 
-  function applyKeys(dt: number): void {
-    const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
-    const left = keys.has('ArrowLeft'), right = keys.has('ArrowRight');
-    const sign = settings.steerMode === 'bow' ? -1 : 1;
-    if (left) c.tiller = clamp(c.tiller - sign * 1.6 * dt, -1, 1);
-    if (right) c.tiller = clamp(c.tiller + sign * 1.6 * dt, -1, 1);
-    if (!left && !right && !draggingTiller && settings.springTiller) c.tiller *= Math.max(0, 1 - 5 * dt);
-    if (keys.has('ArrowUp')) c.main = clamp(c.main + 0.45 * dt, 0, 1);
-    if (keys.has('ArrowDown')) c.main = clamp(c.main - 0.45 * dt, 0, 1);
-    if (keys.has('w') || keys.has('ц')) { c.jib = clamp(c.jib + 0.45 * dt, 0, 1); prefs.linkJib = linkCb.checked = false; }
-    if (keys.has('s') || keys.has('ы')) { c.jib = clamp(c.jib - 0.45 * dt, 0, 1); prefs.linkJib = linkCb.checked = false; }
-    if (keys.has('q') || keys.has('й')) { c.hike = clamp(c.hike + 0.6 * dt, 0, 1); prefs.autoHike = autoCb.checked = false; }
-    if (keys.has('a') || keys.has('ф')) { c.hike = clamp(c.hike - 0.6 * dt, 0, 1); prefs.autoHike = autoCb.checked = false; }
-    if (prefs.linkJib) c.jib = c.main;
+  const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+  /** A short tap still moves the sheet a little. */
+  function nudge(hold: Hold): void {
+    if (hold === 'mainIn') c.main = clamp01(c.main + 0.04);
+    if (hold === 'mainOut') c.main = clamp01(c.main - 0.04);
+    if (hold === 'jibIn' && !prefs.linkJib) c.jib = clamp01(c.jib + 0.04);
+    if (hold === 'jibOut' && !prefs.linkJib) c.jib = clamp01(c.jib - 0.04);
   }
 
-  function syncInputs(force = false): void {
-    const set = (el: HTMLInputElement, v: number) => { if (force || document.activeElement !== el || el === tillerIn) el.value = String(Math.round(v)); };
-    if (!draggingTiller || force) set(tillerIn, c.tiller * 100 * tillerSign());
-    set(mainIn, c.main * 100);
-    set(jibIn, c.jib * 100);
-    set(hikeIn, c.hike * 100);
-    clear(tillerEnds);
-    if (settings.steerMode === 'bow') tillerEnds.append(h('span', null, '◀ нос влево'), h('span', null, 'нос вправо ▶'));
-    else tillerEnds.append(h('span', null, '◀ румпель влево (нос вправо)'), h('span', null, '(нос влево) румпель вправо ▶'));
+  function applyControls(dt: number): void {
+    const push = (held.has('away') ? 1 : 0) - (held.has('toward') ? 1 : 0);
+    if (push !== 0) tillerCmd = Math.max(-1, Math.min(1, tillerCmd + push * 2.2 * dt));
+    else tillerCmd *= Math.max(0, 1 - 6 * dt);
+    if (simple()) {
+      // Luff = tiller to leeward.
+      const windSide = tel ? (tel.twa >= 0 ? 1 : -1) : 1;
+      c.tiller = -windSide * tillerCmd;
+    } else {
+      // "От себя" = away from the helmsman, who sits with the crew.
+      c.tiller = -s.crewSide * tillerCmd;
+    }
+    const rate = 0.4 * dt;
+    if (held.has('mainIn')) c.main = clamp01(c.main + rate);
+    if (held.has('mainOut')) c.main = clamp01(c.main - rate);
+    if (!prefs.linkJib) {
+      if (held.has('jibIn')) c.jib = clamp01(c.jib + rate);
+      if (held.has('jibOut')) c.jib = clamp01(c.jib - rate);
+    } else c.jib = c.main;
   }
 
   // ---------- Loop ----------
@@ -289,24 +343,46 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   let last = performance.now();
   let hudTimer = 0;
   let toastTimer = 0;
+  let encounterText = '';
 
   function showToast(text: string): void {
     toast.textContent = text;
     toast.style.opacity = '1';
-    toastTimer = text.length > 30 ? 3.5 : 1.6;
+    toastTimer = text.length > 40 ? 3.5 : 1.8;
+  }
+
+  function checkGround(): boolean {
+    if (!world) return false;
+    const sh = Math.sin(s.heading), ch = Math.cos(s.heading);
+    const pts = [[s.x, s.y], [s.x + sh * 2.1, s.y + ch * 2.1], [s.x - sh * 2, s.y - ch * 2]];
+    for (const [x, y] of pts) {
+      const hit = isBlocked(world, x, y);
+      if (!hit) continue;
+      const speed = Math.hypot(s.u, s.v);
+      if (hit !== 'shoal' && speed < 0.8) {
+        // Gentle touch: the boat just stops against the pontoon or shore.
+        s.x -= sh * 0.4; s.y -= ch * 0.4; s.u = 0; s.v = 0;
+        if (toastTimer <= 0) showToast(hit === 'pontoon' ? 'Касание причала' : 'Касание берега');
+        return false;
+      }
+      grounded(hit);
+      return true;
+    }
+    safeTimer += 1;
+    if (safeTimer % 60 === 0) { safeTrail.push({ x: s.x, y: s.y, heading: s.heading }); if (safeTrail.length > 4) safeTrail.shift(); }
+    return false;
   }
 
   function frame(now: number): void {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     if (!paused) {
-      applyKeys(dt);
+      applyControls(dt);
       const sub = 4;
       const events: SimEvent[] = [];
       for (let i = 0; i < sub; i++) {
         const w = windAt(windModel, time);
         lastWind = w;
-        if (prefs.autoHike && tel) c.hike = autoHike(s, tel);
         const r = step(s, c, w, dt / sub);
         tel = r.t;
         events.push(...r.events);
@@ -314,21 +390,25 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
         if (s.capsized) break;
       }
       for (const e of events) {
-        if (e === 'tack') counters.tacks++;
-        if (e === 'gybe') counters.gybes++;
-        if (e === 'crashGybe') counters.crashGybes++;
-        const txt = EVENT_TEXT[e];
-        if (txt && (e !== 'gybe' || !events.includes('crashGybe'))) showToast(txt);
+        if (e === 'tack') { counters.tacks++; showToast('Поворот оверштаг — «Смена борта!»'); }
+        if (e === 'gybe') { counters.gybes++; if (!events.includes('crashGybe')) showToast('Поворот фордевинд — «Смена борта!»'); }
+        if (e === 'crashGybe') { counters.crashGybes++; showToast('Неконтролируемый поворот фордевинд! Перед поворотом подберите грота-шкот.'); }
+      }
+      if (traffic) {
+        for (const ev of traffic.update(dt, s, lastWind.from)) {
+          if (ev.kind === 'collision') {
+            if (mission.id === 'free') freeMishap('Столкновение!', `${ev.textRu} Уступающее судно должно менять курс заранее и явно.`, () => { s.u = 0; s.v = 0; });
+          } else if (ev.kind === 'encounter' || ev.kind === 'violation') showToast(ev.textRu);
+        }
       }
       if (s.capsized) capsized();
-      else if (tel) {
-        const res = runtime.update({ s, t: tel, time, dt, events, marks: runtime.marks, counters });
+      else if (!checkGround() && tel && !finished) {
+        const res = runtime.update({ s, t: tel, time, dt, events, marks: runtime.marks, counters, world, traffic });
         if (res) finish(res.won, res.textRu);
       }
-      syncInputs();
     }
     if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) toast.style.opacity = '0'; }
-    renderer.draw(s, c, tel, lastWind, runtime.marks as Mark[], time, paused ? 0 : dt, zoom);
+    renderer.draw(s, c, tel, lastWind, runtime.marks as Mark[], time, paused ? 0 : dt, zoom, { world, vessels: traffic?.vessels ?? [], night });
     hudTimer -= dt;
     if (hudTimer <= 0) { hudTimer = 0.12; updateHud(); }
     raf = requestAnimationFrame(frame);
@@ -344,33 +424,55 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     hudTL.append(
       h('div', { class: 'val' }, `${kn.toFixed(1)} уз`),
       h('div', { class: 'pos' }, POINT_OF_SAIL_RU[pos], pos !== 'irons' ? `, ${tack}` : ''),
-      h('div', { class: 'small', style: { opacity: '0.85' } }, POINT_OF_SAIL_EN[pos]),
       h('div', { class: 'small' }, `курс ${Math.round(hdg).toString().padStart(3, '0')}° · к ветру ${Math.round(Math.abs(twa) / DEG)}°`),
+      h('div', { class: 'small phone-only' }, `крен ${Math.abs(s.heel / DEG).toFixed(0)}°`),
     );
     const wkn = lastWind.speed * 1.944;
-    const dirDeg = lastWind.from / DEG; // arrow drawn pointing down = wind from north
     clear(hudTR);
     hudTR.append(
-      h('div', { class: 'wind-dial', html: `<svg viewBox="-32 -32 64 64"><circle r="30" fill="rgba(0,0,0,0.25)" stroke="rgba(255,255,255,0.6)"/><g transform="rotate(${dirDeg})"><line y1="-20" y2="14" stroke="#fff" stroke-width="4"/><polygon points="-8,9 8,9 0,22" fill="#fff"/></g></svg>` }),
+      h('div', { class: 'wind-dial', html: `<svg viewBox="-32 -32 64 64"><circle r="30" fill="rgba(0,0,0,0.25)" stroke="rgba(255,255,255,0.6)"/><g transform="rotate(${lastWind.from / DEG})"><line y1="-20" y2="14" stroke="#fff" stroke-width="4"/><polygon points="-8,9 8,9 0,22" fill="#fff"/></g></svg>` }),
       h('div', { class: 'val' }, `${wkn.toFixed(0)} уз`),
       h('div', { class: 'small' }, lastWind.gust > 0.2 ? '💨 порыв!' : 'ветер'),
     );
     const heelDeg = s.heel / DEG;
     clear(hudBL);
-    hudBL.append(
-      h('div', { class: 'heel-gauge', html: heelSvg(heelDeg) }),
-      h('div', { class: 'small' }, `крен ${Math.abs(heelDeg).toFixed(0)}° · шверт: ${c.board > 0.9 ? 'опущен' : c.board > 0.3 ? 'наполовину' : 'поднят'}`),
-    );
+    hudBL.append(h('div', { class: 'heel-gauge', html: heelSvg(heelDeg) }), h('div', { class: 'small' }, `крен ${Math.abs(heelDeg).toFixed(0)}°`));
     clear(objective);
     objective.append(runtime.objective);
     if (runtime.progress !== undefined) objective.append(h('div', { class: 'progress' }, h('div', { style: { width: `${runtime.progress * 100}%` } })));
     objective.style.display = runtime.objective ? '' : 'none';
+
     clear(hintBox);
-    if (tel && !paused) for (const hn of hints(s, c, tel)) hintBox.append(h('div', { class: `hint ${hn.level}` }, hn.ru));
-    tillerLbl.textContent = c.tiller === 0 ? 'прямо' : `${Math.round(Math.abs(c.tiller) * 35)}° ${c.tiller > 0 ? 'вправо' : 'влево'}`;
-    mainLbl.textContent = `${Math.round(Math.abs(s.boom) / DEG)}° от ДП`;
-    jibLbl.textContent = `${Math.round(Math.abs(s.jibAngle) / DEG)}°`;
-    hikeLbl.textContent = `${Math.round(c.hike * 100)}%`;
+    if (tel && !paused) {
+      const enc = traffic?.current();
+      encounterText = '';
+      if (enc?.encounter) {
+        encounterText = enc.encounter.giveWay === 'own'
+          ? `⚠ Уступите дорогу: ${TRAFFIC_RU[enc.type]} (${enc.encounter.ruleRu})`
+          : `Вам уступает ${TRAFFIC_RU[enc.type]} — держите курс и скорость`;
+        hintBox.append(h('div', { class: `hint ${enc.encounter.giveWay === 'own' ? 'danger' : 'ok'}` }, encounterText));
+      }
+      for (const hn of hints(s, tel, world).slice(0, encounterText ? 2 : 3)) hintBox.append(h('div', { class: `hint ${hn.level}` }, hn.ru));
+    }
+
+    // Controls panel
+    const tillerDeg = Math.round(Math.abs(tillerCmd) * 35);
+    tillerInfo.textContent = tillerDeg < 2 ? 'прямо' : simple()
+      ? `${tillerCmd > 0 ? 'приводимся' : 'уваливаемся'} ${tillerDeg}°`
+      : `${tillerCmd > 0 ? 'от себя' : 'к себе'} ${tillerDeg}°`;
+    mainInfo.innerHTML = sheetBar(c.main, Math.abs(s.boom) / DEG);
+    jibInfo.innerHTML = sheetBar(c.jib, Math.abs(s.jibAngle) / DEG);
+    clear(stateBox);
+    if (tel) {
+      const item = (label: string, text: string, bad: boolean) => h('span', { class: `st ${bad ? 'bad' : 'good'}` }, `${bad ? '✗' : '✓'} ${label}: ${text}`);
+      stateBox.append(
+        item('Грот', SAIL_STATE_RU[tel.main.state], tel.main.state !== 'ok'),
+        item('Стаксель', SAIL_STATE_RU[tel.jib.state], tel.jib.state !== 'ok' && tel.jib.state !== 'goosewing' && tel.jib.state !== 'blanketed'),
+        item('Экипаж', tel.crewLeeward ? 'на подветренном борту!' : s.crewSide > 0 ? 'правый борт' : 'левый борт', tel.crewLeeward),
+      );
+      const needSwitch = tel.crewLeeward || (tel.jib.state === 'backed' && pointOfSail(tel.twa) !== 'irons');
+      sideBtn.classList.toggle('attention', needSwitch);
+    }
   }
 
   reset(true);
@@ -383,12 +485,15 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   };
 }
 
+function sheetBar(sheet: number, angleDeg: number): string {
+  return `<div class="sheet-bar"><div style="width:${Math.round(sheet * 100)}%"></div></div><div class="sheet-txt">${Math.round(angleDeg)}° от ДП</div>`;
+}
+
 function heelSvg(heelDeg: number): string {
   const a = Math.max(-70, Math.min(70, heelDeg));
   const danger = Math.abs(a) > 30 ? '#ff5a5a' : Math.abs(a) > 18 ? '#ffc23d' : '#7fe08f';
   return `<svg viewBox="-60 -8 120 70">
     <path d="M-50 0 A50 50 0 0 0 50 0" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="2"/>
-    <path d="M-50 0 L50 0" stroke="rgba(255,255,255,0.35)"/>
-    <g transform="rotate(${a})"><line x1="0" y1="0" x2="0" y2="-2" /><path d="M-22 6 Q0 26 22 6 Z" fill="${danger}"/><line x1="0" y1="6" x2="0" y2="-40" stroke="#fff" stroke-width="3"/></g>
+    <g transform="rotate(${a})"><path d="M-22 6 Q0 26 22 6 Z" fill="${danger}"/><line x1="0" y1="6" x2="0" y2="-40" stroke="#fff" stroke-width="3"/></g>
   </svg>`;
 }
