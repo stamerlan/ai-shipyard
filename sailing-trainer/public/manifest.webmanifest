@@ -1,0 +1,16 @@
+{
+  "name": "Парусный тренажёр",
+  "short_name": "Парус",
+  "description": "Термины, устройство лодки, знаки, манёвры, правила расхождения и симулятор швертбота.",
+  "lang": "ru",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f6f9",
+  "theme_color": "#0b3d5c",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
