@@ -9,7 +9,7 @@ import { MISSIONS } from '../sim/missions';
 const TILES = [
   { href: '#/glossary', icon: '📖', ru: 'Словарь', en: 'Glossary', text: `${TERMS.length} терминов по-русски и по-английски, поиск и категории.` },
   { href: '#/cards', icon: '🃏', ru: 'Карточки', en: 'Flashcards', text: 'Интервальное повторение: термины, знаки, сигналы и команды.' },
-  { href: '#/quiz', icon: '✅', ru: 'Тесты', en: 'Quizzes', text: 'Выбор ответа: перевод, определения, знаки, ситуации на воде.' },
+  { href: '#/quiz', icon: '✅', ru: 'Тесты', en: 'Quizzes', text: 'Выбор ответа: определения, знаки и сигналы, команды, ситуации на воде.' },
   { href: '#/parts', icon: '⛵', ru: 'Устройство лодки', en: 'Parts of the boat', text: 'Интерактивная схема швертбота: сбоку и сверху, с проверкой.' },
   { href: '#/signs', icon: '🚩', ru: 'Знаки и сигналы', en: 'Signs & signals', text: `${SIGNS.length} знаков и сигналов: МАМС, внутренние водные пути (CEVNI), звуки, флаги.` },
   { href: '#/maneuvers', icon: '🔄', ru: 'Манёвры и команды', en: 'Manoeuvres & commands', text: 'Оверштаг, фордевинд, «человек за бортом», опрокидывание, подход к бую.' },
