@@ -79,6 +79,7 @@ export class Renderer {
       this.drawGrid(v);
       if (scene.world) this.drawWorld(v, scene.world);
     }
+    if (scene.world) this.drawChartExtras(v, scene.world);
     this.drawWindParticles(v, wind, dt);
     this.updateWake(s, dt);
     this.drawWake(v);
@@ -121,6 +122,58 @@ export class Renderer {
       ctx.fillText(scene.world.attribution, w / 2, h - 4);
       ctx.textAlign = 'left';
     }
+  }
+
+  /** Zones, fairway lines and ships at anchor / alongside. */
+  private drawChartExtras(v: View, w: World): void {
+    const { ctx, k } = v;
+    const path = (p: [number, number][]) => {
+      ctx.beginPath();
+      p.forEach(([x, y], i) => { const [sx, sy] = this.toScreen(v, x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+      ctx.closePath();
+    };
+    for (const z of w.zones ?? []) {
+      path(z.poly);
+      if (z.kind === 'prohibited') {
+        ctx.fillStyle = 'rgba(215,38,46,0.16)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(215,38,46,0.95)'; ctx.lineWidth = 2.5; ctx.setLineDash([10, 4, 2, 4]);
+      } else if (z.kind === 'swim') {
+        ctx.fillStyle = 'rgba(255,214,64,0.15)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(255,214,64,0.95)'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+      } else {
+        ctx.strokeStyle = 'rgba(190,90,220,0.9)'; ctx.lineWidth = 2; ctx.setLineDash([12, 6]);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // Fairway centre lines (like the recommended track on a chart).
+    ctx.strokeStyle = 'rgba(200,60,200,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([14, 8]);
+    for (const l of w.shipLanes ?? []) {
+      ctx.beginPath();
+      l.pts.forEach(([x, y], i) => { const [sx, sy] = this.toScreen(v, x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    for (const sh of w.mooredShips ?? []) {
+      const [x, y] = this.toScreen(v, sh.x, sh.y);
+      const L = sh.halfL * 2 * k, B = sh.halfB * 2 * k;
+      if (x < -L || y < -L || x > v.w + L || y > v.h + L) continue;
+      ctx.save();
+      ctx.translate(x, y); ctx.rotate(sh.heading);
+      shipShape(ctx, L, B, '#4f5a63');
+      ctx.restore();
+    }
+    if (!w.labels || w.water) return; // real maps draw labels with the map
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    for (const l of w.labels) {
+      const [x, y] = this.toScreen(v, l.x, l.y);
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.strokeText(l.text, x, y);
+      ctx.fillStyle = '#fff'; ctx.fillText(l.text, x, y);
+    }
+    ctx.textAlign = 'left';
   }
 
   private drawFog(v: View, night: boolean): void {
@@ -282,6 +335,11 @@ export class Renderer {
     const items: { x: number; y: number; light: Light; r: number; phase: number }[] = [
       ...w.buoys.map((b, i) => ({ x: b.x, y: b.y, light: b.light, r: 1, phase: i * 0.37 })),
       ...w.lighthouses.map((l, i) => ({ x: l.x, y: l.y, light: l.light, r: l.name === 'Маяк' ? 3 : 1.4, phase: i * 0.7 })),
+      // Ships at anchor: all-round white lights fore and aft.
+      ...(w.mooredShips ?? []).flatMap((sh) => [-1, 1].map((e) => ({
+        x: sh.x + Math.sin(sh.heading) * sh.halfL * 0.8 * e, y: sh.y + Math.cos(sh.heading) * sh.halfL * 0.8 * e,
+        light: { char: '', color: 'white' as const }, r: 0.8, phase: 0,
+      }))),
     ];
     const { ctx } = v;
     for (const it of items) {
@@ -344,13 +402,7 @@ export class Renderer {
     ctx.translate(x, y);
     ctx.rotate(vs.heading);
     if (vs.type === 'ship') {
-      ctx.fillStyle = '#56616b';
-      ctx.strokeStyle = '#1d242a';
-      ctx.beginPath();
-      ctx.moveTo(0, -L / 2); ctx.quadraticCurveTo(B / 2, -L / 2 + B, B / 2, -L / 4); ctx.lineTo(B / 2, L / 2); ctx.lineTo(-B / 2, L / 2); ctx.lineTo(-B / 2, -L / 4); ctx.quadraticCurveTo(-B / 2, -L / 2 + B, 0, -L / 2);
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle = '#e9edf0';
-      ctx.fillRect(-B / 2.6, L / 2 - L / 5, B / 1.3, L / 7);
+      shipShape(ctx, L, B, vs.lane ? '#8a3b2e' : '#56616b');
     } else {
       ctx.fillStyle = vs.type === 'motor' ? '#f4f4f4' : '#e0473c';
       ctx.strokeStyle = '#222';
@@ -418,6 +470,15 @@ export class Renderer {
       ctx.fillStyle = b.kind === 'port' ? '#ff4d4d' : b.kind === 'starboard' ? '#3fd16b' : b.kind === 'special' ? '#ffd23f' : b.kind === 'safe' ? '#fff' : '#f6c718';
       ctx.fillRect(mx(b.x) - 1, my(b.y) - 1, 2.5, 2.5);
     }
+    for (const z of w.zones ?? []) {
+      ctx.strokeStyle = z.kind === 'prohibited' ? '#ff5a5a' : z.kind === 'swim' ? '#ffd640' : '#c070e0';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      z.poly.forEach(([x, y], i) => (i ? ctx.lineTo(mx(x), my(y)) : ctx.moveTo(mx(x), my(y))));
+      ctx.closePath(); ctx.stroke();
+    }
+    ctx.fillStyle = '#9aa6b0';
+    for (const sh of w.mooredShips ?? []) ctx.fillRect(mx(sh.x) - 1.5, my(sh.y) - 1.5, 3, 3);
     ctx.fillStyle = '#ffffff';
     for (const vs of scene.vessels) ctx.fillRect(mx(vs.x) - 1.5, my(vs.y) - 1.5, 3, 3);
     for (const m of marks) if (m.active) { ctx.fillStyle = '#ff8c1a'; ctx.beginPath(); ctx.arc(mx(m.x), my(m.y), 3, 0, Math.PI * 2); ctx.fill(); }
@@ -772,4 +833,21 @@ export function drawBuoyIcon(ctx: CanvasRenderingContext2D, x: number, y: number
     case 'special': ctx.strokeStyle = Y; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x - t * 0.5, pole - t); ctx.lineTo(x + t * 0.5, pole); ctx.moveTo(x + t * 0.5, pole - t); ctx.lineTo(x - t * 0.5, pole); ctx.stroke(); break;
   }
   ctx.restore();
+}
+
+/** Top view of a ship (bow up), centred at the origin. */
+function shipShape(ctx: CanvasRenderingContext2D, L: number, B: number, hull: string): void {
+  ctx.fillStyle = hull;
+  ctx.strokeStyle = '#1d242a';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, -L / 2); ctx.quadraticCurveTo(B / 2, -L / 2 + B, B / 2, -L / 4); ctx.lineTo(B / 2, L / 2); ctx.lineTo(-B / 2, L / 2); ctx.lineTo(-B / 2, -L / 4); ctx.quadraticCurveTo(-B / 2, -L / 2 + B, 0, -L / 2);
+  ctx.fill(); ctx.stroke();
+  if (L > 60) {
+    // Cargo hatches
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    for (let i = 0; i < 4; i++) ctx.fillRect(-B / 3, -L / 4 + i * L / 9, B / 1.5, L / 12);
+  }
+  ctx.fillStyle = '#e9edf0';
+  ctx.fillRect(-B / 2.6, L / 2 - L / 5, B / 1.3, L / 7);
 }

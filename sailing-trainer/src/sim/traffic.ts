@@ -3,7 +3,7 @@
 // if the other vessel must give way it alters course; if you must give way it stands on.
 
 import { judge, type Vessel as RuleVessel, type VesselType } from '../rules/rightOfWay';
-import { isBlocked, type World } from './world';
+import { isBlocked, type World, type Pt } from './world';
 import type { BoatState } from './physics';
 
 export type TrafficType = Extract<VesselType, 'motor' | 'sail' | 'ship'>;
@@ -23,6 +23,8 @@ export interface AIVessel {
   /** Seconds left of an avoiding turn. */
   avoiding: number;
   avoidHeading: number;
+  /** Cargo ship following a fairway: it cannot leave the channel and does not give way to small craft. */
+  lane?: { pts: Pt[]; seg: number; warned: boolean; wait: number; cooldown: number };
 }
 
 export interface Encounter {
@@ -62,14 +64,67 @@ export class Traffic {
   private spawnTimer = 2;
   violations = 0;
   collisions = 0;
+  private laneCount: number;
+  private laneSpawned = 0;
 
-  constructor(public count: number, private world: World | null, private rnd: () => number = Math.random) {}
+  constructor(public count: number, private world: World | null, private rnd: () => number = Math.random, laneShips?: number) {
+    this.laneCount = world?.shipLanes?.length ? laneShips ?? world.laneShips ?? 2 : 0;
+  }
 
   reset(): void {
     this.vessels = [];
     this.spawnTimer = 2;
     this.violations = 0;
     this.collisions = 0;
+  }
+
+  /** Put a cargo ship on a random fairway, away from the player but not too far. */
+  private spawnLane(s: BoatState, initial: boolean): void {
+    const lanes = this.world!.shipLanes!;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const lane = lanes[Math.floor(this.rnd() * lanes.length)];
+      const seg = Math.floor(this.rnd() * (lane.pts.length - 1));
+      const [ax, ay] = lane.pts[seg], [bx, by] = lane.pts[seg + 1];
+      const t = initial ? this.rnd() : attempt < 20 ? 0 : this.rnd() * 0.3;
+      const x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
+      const d = Math.hypot(x - s.x, y - s.y);
+      if (d < 260 || d > 1800) continue;
+      if (this.vessels.some((v) => v.lane && Math.hypot(v.x - x, v.y - y) < 400)) continue;
+      const heading = Math.atan2(bx - ax, by - ay);
+      const halfL = 38 + this.rnd() * 22;
+      this.vessels.push({
+        id: this.nextId++, type: 'ship', x, y, heading, baseHeading: heading, speed: 4 + this.rnd() * 1.5,
+        halfL, halfB: halfL * 0.16, encounter: null, avoiding: 0, avoidHeading: heading,
+        lane: { pts: lane.pts, seg, warned: false, wait: 0, cooldown: 0 },
+      });
+      return;
+    }
+  }
+
+  private updateLane(v: AIVessel, dt: number, s: BoatState, events: TrafficEvent[]): void {
+    const L = v.lane!;
+    const [tx, ty] = L.pts[L.seg + 1];
+    if (Math.hypot(tx - v.x, ty - v.y) < 25) {
+      if (L.seg + 2 < L.pts.length) L.seg++;
+      else L.wait += dt; // end of the fairway: the ship stops (berthing); removed once out of sight
+    }
+    const [nx, ny] = L.pts[Math.min(L.seg + 1, L.pts.length - 1)];
+    const want = Math.atan2(nx - v.x, ny - v.y);
+    v.heading += Math.max(-0.06 * dt, Math.min(0.06 * dt, wrap(want - v.heading)));
+    const sp = L.wait > 0 ? 0 : v.speed;
+    v.x += Math.sin(v.heading) * sp * dt;
+    v.y += Math.cos(v.heading) * sp * dt;
+    // Small craft must not impede a vessel that can navigate only within a fairway (COLREG 9(b), 9(d)).
+    const dx = s.x - v.x, dy = s.y - v.y;
+    const along = dx * Math.sin(v.heading) + dy * Math.cos(v.heading);
+    const across = dx * Math.cos(v.heading) - dy * Math.sin(v.heading);
+    const inPath = sp > 0 && along > v.halfL && along < v.halfL + 200 && Math.abs(across) < v.halfB + 18;
+    if (inPath && !L.warned) {
+      L.warned = true;
+      this.violations++;
+      events.push({ kind: 'violation', vessel: v, textRu: 'Судно в фарватере даёт пять коротких гудков: вы мешаете его проходу! Маломерное и парусное судно не должно затруднять движение судна, которое может идти только по фарватеру (МППСС, правило 9). Уходите с его курса.' });
+    }
+    if (L.warned && (along < 0 || Math.abs(across) > v.halfB + 60)) L.warned = false;
   }
 
   private ownVessel(s: BoatState): RuleVessel {
@@ -112,7 +167,9 @@ export class Traffic {
   update(dt: number, s: BoatState, windFrom: number): TrafficEvent[] {
     const events: TrafficEvent[] = [];
     this.spawnTimer -= dt;
-    if (this.vessels.length < this.count && this.spawnTimer <= 0) {
+    const lanes = this.vessels.filter((v) => v.lane).length;
+    if (lanes < this.laneCount) { this.spawnLane(s, this.laneSpawned < this.laneCount); this.laneSpawned++; }
+    if (this.vessels.length - lanes < this.count && this.spawnTimer <= 0) {
       this.spawn(s, windFrom);
       this.spawnTimer = 8 + this.rnd() * 8;
     }
@@ -120,6 +177,17 @@ export class Traffic {
     const ovx = Math.sin(s.heading) * own.speed, ovy = Math.cos(s.heading) * own.speed;
 
     for (const v of this.vessels) {
+      if (v.lane) {
+        this.updateLane(v, dt, s, events);
+        v.lane.cooldown = Math.max(0, v.lane.cooldown - dt);
+        if (v.lane.cooldown === 0 && collides(v, s.x, s.y)) {
+          v.lane.cooldown = 8;
+          this.collisions++;
+          events.push({ kind: 'collision', vessel: v, textRu: 'Столкновение с грузовым судном!' });
+          s.u = 0; s.v = 0;
+        }
+        continue;
+      }
       // Steering: avoid if needed, otherwise return to the original course.
       const want = v.avoiding > 0 ? v.avoidHeading : v.baseHeading;
       v.heading += Math.max(-0.35 * dt, Math.min(0.35 * dt, wrap(want - v.heading)));
@@ -170,6 +238,7 @@ export class Traffic {
     }
     this.vessels = this.vessels.filter((v) => {
       const d = Math.hypot(v.x - s.x, v.y - s.y);
+      if (v.lane) return !(v.lane.wait > 0 && d > 600) && d < 2500;
       const blocked = this.world ? isBlocked(this.world, v.x, v.y) : null;
       return d < 320 && !blocked;
     });

@@ -8,8 +8,9 @@ import {
 import { Renderer, type Mark } from '../sim/render';
 import { MISSIONS, MISSION_BY_ID, type MissionDef, type MissionRuntime } from '../sim/missions';
 import { hints, SAIL_STATE_RU } from '../sim/hints';
-import { createWorld, isBlocked, type World } from '../sim/world';
-import { createGdanskWorld, GDANSK_STARTS, GULF_ANCHOR } from '../sim/gdanskWorld';
+import { createWorld, isBlocked, zoneAt, type World, type BlockKind, type Zone } from '../sim/world';
+import { createBayWorld } from '../sim/charts';
+import { createGdanskWorld, GDANSK_STARTS, GULF_ANCHOR, harboursNear, toMapCoords } from '../sim/gdanskWorld';
 import {
   loadConditions, saveConditions, resolveWindDir, resolveBft, gustFactor, placeFn, windFromRu, AREA_RU, DIR_OPTIONS,
   VIS_RANGE, VIS_RU, type AreaId, type Conditions,
@@ -123,6 +124,9 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   syncJibButtons();
   const sideBtn = h('button', { class: 'btn side-btn', onClick: () => doSwitch() }, '⇄ Смена борта (Enter)');
   const stateBox = h('div', { class: 'sail-state' });
+  // Free sailing near a marina: drop the sails and continue under engine to a berth.
+  const engineBox = h('div', { class: 'engine-box' });
+  let engineKey = '';
 
   const row = (cls: string, label: string, a: HTMLElement, mid: HTMLElement, b: HTMLElement, extra?: HTMLElement) =>
     h('div', { class: `ctl-row ${cls}` }, h('div', { class: 'ctl-name' }, label, extra), a, mid, b);
@@ -131,6 +135,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     row('r-main', 'Грот', mainOut.el, mainInfo, mainIn.el),
     row('r-jib', 'Стаксель', jibOut.el, jibInfo, jibIn.el, h('label', { class: 'link' }, linkCb, ' с гротом')),
     h('div', { class: 'ctl-row side-row' }, sideBtn, stateBox),
+    engineBox,
   );
 
   root.append(h('div', { class: 'sim' }, bar, stage, controls));
@@ -138,15 +143,18 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   // ---------- Simulation ----------
   function reset(showIntro: boolean): void {
     const isFree = mission.id === 'free';
-    area = mission.realMap ? 'gdansk' : mission.world ? 'training' : isFree ? cond.freeArea : cond.area === 'gdansk' ? 'gdansk' : 'open';
-    world = area === 'gdansk' ? createGdanskWorld() : area === 'training' ? createWorld() : null;
+    area = mission.realMap ? 'gdansk' : mission.chart ?? (mission.world ? 'training' : isFree ? cond.freeArea : cond.area === 'gdansk' ? 'gdansk' : 'open');
+    world = area === 'gdansk' ? createGdanskWorld() : area === 'training' ? createWorld() : area === 'bay' ? createBayWorld() : null;
+    lastZone = null;
     night = cond.night === 'night' || (cond.night === 'auto' && !!mission.night);
     renderer.fogRange = VIS_RANGE[cond.vis];
     const tcount = mission.traffic ?? (isFree ? prefs.freeTraffic : 0);
-    traffic = tcount > 0 ? new Traffic(tcount, world) : null;
+    traffic = tcount > 0 || (world?.shipLanes && mission.laneShips !== 0) ? new Traffic(tcount, world, Math.random, mission.laneShips) : null;
     windDeg = resolveWindDir(cond, mission.windDeg ?? 0);
     bft = resolveBft(cond, mission.beaufort);
     const wFrom = windDeg * DEG;
+    // Ships at anchor lie head to wind.
+    if (area === 'bay') for (const sh of world!.mooredShips ?? []) sh.heading = wFrom;
     const gf = gustFactor(cond.gusts);
     windModel = {
       base: { from: wFrom, speed: BEAUFORT_MS[bft] ?? 4.4 },
@@ -164,8 +172,9 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       for (const m of runtime.marks) [m.x, m.y] = place(m.x, m.y);
     } else if (isFree) {
       const p = area === 'gdansk' ? GDANSK_STARTS.find(([id]) => id === cond.freeStart) ?? GDANSK_STARTS[0] : null;
-      st = { ...st, x: p ? p[2] : area === 'training' ? 20 : 0, y: p ? p[3] : 0 };
+      st = { ...st, x: p ? p[2] : area === 'training' ? 20 : area === 'bay' ? -400 : 0, y: p ? p[3] : 0 };
       st.heading = bestHeading(st.x, st.y, wFrom);
+      if (area === 'gdansk') st.speed = 0.6; // narrow rivers: start slowly
     }
     s = initialState(st.heading, st.x, st.y, st.speed, wFrom);
     c.tiller = 0; c.main = st.main; c.jib = st.main;
@@ -177,7 +186,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     safeTrail = [{ x: s.x, y: s.y, heading: s.heading }];
     renderer.reset();
     renderer.showNoGo = prefs.showNoGo;
-    zoom = night ? 0.3 : world?.water ? 0.5 : world ? 0.6 : traffic ? 0.7 : 1;
+    zoom = night ? 0.3 : world?.water ? 0.5 : area === 'bay' ? 0.4 : world ? 0.6 : traffic ? 0.7 : 1;
     if (Number.isFinite(renderer.fogRange)) zoom = Math.max(zoom, 0.6);
     // Let the sails settle into position before the start.
     for (let i = 0; i < 60; i++) {
@@ -208,6 +217,10 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
         h('li', null, 'Шкоты: «Выбрать» — парус ближе к ДП, «Потравить» — дальше. Состояние парусов показано под кнопками.'),
         h('li', null, 'После каждого поворота оверштаг или фордевинд — команда «Смена борта»: экипаж пересаживается, стаксель перекидывается на новый борт.'),
         world ? h('li', null, 'Не выходите на берег и мели. Мини-карта справа — как картплоттер.') : null,
+        world?.zones ? h('li', null, 'Красная штрихпунктирная граница — запретный район, жёлтая — зона купания (судам вход запрещён), фиолетовая — якорная стоянка.') : null,
+        world?.shipLanes ? h('li', null, 'Розовый пунктир — ось судоходного фарватера. Грузовые суда идут только по нему и не могут уступить: не мешайте им (МППСС, правило 9), пересекайте фарватер под прямым углом и за кормой судна.') : null,
+        mission.id === 'free' && area === 'gdansk' ? h('li', null, 'У марин Гданьска (Старый город, Шафарня, NCŻ) появится кнопка «⚙ На мотор» — уберите паруса и идите к причалу под мотором.') : null,
+        area === 'bay' ? h('li', null, 'Учебная карта выдуманная (как учебные карты RYA) — для тренировки, не для навигации.') : null,
         world?.water ? h('li', null, 'Реальная карта большая: кнопки «−/+» меняют масштаб, «×1» ускоряет время. Береговая линия и молы — по данным OpenStreetMap, глубины не показаны: держитесь фарватеров.') : null,
         traffic ? h('li', null, 'Красный пунктир вокруг судна — уступаете вы; зелёный — уступают вам.') : null),
       h('p', { class: 'keys' }, KEYS_HELP.map(([k, t]) => h('span', { style: { marginRight: '10px', display: 'inline-block' } }, h('kbd', null, k), ' ', t))),
@@ -240,7 +253,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     const areaEl = mission.realMap || mission.world
       ? h('label', { class: 'cond' }, h('span', { class: 'small muted' }, 'Карта'), h('span', null, mission.realMap ? 'Гданьск (реальная карта)' : 'Учебная акватория'))
       : isFree
-        ? sel('Карта', (['gdansk', 'training', 'open'] as AreaId[]).map((a) => [a, AREA_RU[a]]), cond.freeArea, (v) => { cond.freeArea = v as AreaId; })
+        ? sel('Карта', (['gdansk', 'bay', 'training', 'open'] as AreaId[]).map((a) => [a, AREA_RU[a]]), cond.freeArea, (v) => { cond.freeArea = v as AreaId; })
         : sel('Карта', (['open', 'gdansk'] as AreaId[]).map((a) => [a, a === 'gdansk' ? 'Гданьский залив (реальная карта)' : AREA_RU[a]]), cond.area === 'gdansk' ? 'gdansk' : 'open', (v) => { cond.area = v as AreaId; });
     const dirOpts = DIR_OPTIONS.map(([v, t]): [string, string] => [v, v === 'auto' ? `как в задании (${windFromRu(mission.windDeg ?? 0)})` : t]);
     return h('div', { class: 'cond-grid' },
@@ -297,8 +310,10 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     } else finish(false, `Лодка опрокинулась. ${text}`);
   }
 
-  function grounded(kind: 'land' | 'shoal' | 'pontoon'): void {
-    const text = kind === 'shoal'
+  function grounded(kind: BlockKind): void {
+    const text = kind === 'ship'
+      ? 'Навалились на стоящее судно. Суда на якоре и у причала обходите с запасом: на якоре судно разворачивает ветром, его якорная цепь уходит далеко вперёд.'
+      : kind === 'shoal'
       ? 'Сели на мель. Кардинальный знак показывает безопасную сторону: северный обходят с севера, южный — с юга, восточный — с востока, западный — с запада.'
       : kind === 'pontoon' ? 'Удар о причал на скорости. Гасите ход заранее: последний отрезок — против ветра, паруса потравлены.'
         : 'Выбросились на берег. Следите за береговой линией и мини-картой.';
@@ -426,6 +441,29 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     toastTimer = text.length > 40 ? 3.5 : 1.8;
   }
 
+  let lastZone: Zone | null = null;
+  /** Prohibited and swimming areas are closed to boats; anchorages are only announced. */
+  function checkZone(): boolean {
+    if (!world?.zones) return false;
+    const z = zoneAt(world, s.x, s.y);
+    if (z === lastZone) return false;
+    lastZone = z;
+    if (!z) return false;
+    if (z.kind === 'anchorage') { showToast('Якорная стоянка: суда на якоре разворачивает ветром — обходите их с запасом, не проходите у носа (там якорная цепь).'); return false; }
+    const text = z.kind === 'swim'
+      ? 'Вы вошли в зону купания (огорожена жёлтыми знаками). Судам туда входить запрещено.'
+      : `Вы вошли в запретный район («${z.name}»). Жёлтые специальные знаки обозначают его границу — смотрите на карту и обходите.`;
+    if (mission.id === 'free') {
+      freeMishap('Запретная зона!', text, () => {
+        const p = safeTrail[0];
+        Object.assign(s, { x: p.x, y: p.y, heading: p.heading, u: 0, v: 0, r: 0, heel: 0 });
+        safeTrail = [p];
+        lastZone = null;
+      });
+    } else finish(false, text);
+    return true;
+  }
+
   function checkGround(): boolean {
     if (!world) return false;
     const sh = Math.sin(s.heading), ch = Math.cos(s.heading);
@@ -474,11 +512,12 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
         for (const ev of traffic.update(dt, s, lastWind.from)) {
           if (ev.kind === 'collision') {
             if (mission.id === 'free') freeMishap('Столкновение!', `${ev.textRu} Уступающее судно должно менять курс заранее и явно.`, () => { s.u = 0; s.v = 0; });
+            else if (!finished && mission.id !== 'traffic') finish(false, `${ev.textRu} Крупное судно не может быстро отвернуть или остановиться — уходите с его пути заранее.`);
           } else if (ev.kind === 'encounter' || ev.kind === 'violation') showToast(ev.textRu);
         }
       }
       if (s.capsized) capsized();
-      else if (!checkGround() && tel && !finished) {
+      else if (!checkGround() && !checkZone() && tel && !finished) {
         const res = runtime.update({ s, t: tel, time, dt, events, marks: runtime.marks, counters, world, traffic, windFrom: windModel.base.from });
         if (res) finish(res.won, res.textRu);
       }
@@ -490,7 +529,23 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     raf = requestAnimationFrame(frame);
   }
 
+  function updateEngineBox(): void {
+    const near = mission.id === 'free' && area === 'gdansk' ? harboursNear(s.x, s.y) : [];
+    const key = near.map((m) => m.id).join(',');
+    if (key === engineKey) return;
+    engineKey = key;
+    clear(engineBox);
+    for (const m of near) {
+      engineBox.append(h('button', { class: 'btn engine-btn', title: 'Убрать паруса, завести мотор и идти к причалу', onClick: () => {
+        const [x, y] = toMapCoords(m.data, s.x, s.y);
+        sessionStorage.setItem('sailtrainer.handoff', JSON.stringify({ harbour: m.id, x, y, heading: s.heading, windFrom: windModel.base.from, windSpeed: windModel.base.speed }));
+        location.hash = '#/sim?m=moor&from=free';
+      } }, `⚙ Мотор → ${m.nameRu}`));
+    }
+  }
+
   function updateHud(): void {
+    updateEngineBox();
     const kn = (tel?.speed ?? 0) * 1.944;
     const twa = tel?.twa ?? 0;
     const pos = pointOfSail(twa);

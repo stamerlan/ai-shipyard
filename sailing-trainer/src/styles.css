@@ -351,3 +351,15 @@ kbd { background: #eef2f5; border: 1px solid #ccd5dc; border-radius: 4px; paddin
 .cond-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 12px; margin: 10px 0 12px; }
 .cond { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cond select { width: 100%; min-width: 0; }
+
+.preview-bar { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); z-index: 6; display: flex; gap: 10px; align-items: center;
+  background: rgba(10, 40, 70, 0.88); color: #fff; padding: 6px 10px; border-radius: 10px; font-size: 13px; max-width: calc(100% - 180px); }
+@media (max-width: 600px) { .preview-bar { top: auto; bottom: 8px; max-width: calc(100% - 16px); font-size: 12px; } }
+.engine-box { display: flex; gap: 6px; flex-wrap: wrap; padding: 4px 0; }
+.engine-box:empty { display: none; }
+.engine-box .btn { flex: 1 1 auto; }
+.engine-btn { background: #1d7a45; }
+@media (max-width: 600px) {
+  .engine-box { flex-wrap: nowrap; padding: 0; }
+  .engine-btn { padding: 6px 4px; font-size: 12px; line-height: 1.2; }
+}

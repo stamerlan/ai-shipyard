@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, step, switchSide, windAt, wrap, DEG, BEAUFORT_MS, type Controls, type Telemetry, type BoatState } from '../src/sim/physics';
 import { MISSION_BY_ID, type MissionResult } from '../src/sim/missions';
-import { createWorld, isBlocked, type World } from '../src/sim/world';
+import { createWorld, isBlocked, zoneAt, type World } from '../src/sim/world';
+import { createBayWorld } from '../src/sim/charts';
 import { createGdanskWorld, GULF_ANCHOR } from '../src/sim/gdanskWorld';
 import { placeFn } from '../src/sim/conditions';
 
@@ -21,7 +22,7 @@ function run(id: string, pilot: (s: BoatState, t: Telemetry | null, time: number
   const s = initialState(st.heading, st.x, st.y, st.speed, wDeg * DEG);
   const c: Controls = { tiller: 0, main: m.start.main, jib: m.start.main, board: 1 };
   const wm = { base: { from: wDeg * DEG, speed: BEAUFORT_MS[m.beaufort] }, gustiness: 0, shifts: 0, seed: 1 };
-  const world = opts.world !== undefined ? opts.world : m.world ? createWorld() : m.realMap ? createGdanskWorld() : null;
+  const world = opts.world !== undefined ? opts.world : m.world ? createWorld() : m.realMap ? createGdanskWorld() : m.chart === 'bay' ? createBayWorld() : null;
   const counters = { tacks: 0, gybes: 0, crashGybes: 0 };
   let t: Telemetry | null = null;
   const dt = 1 / 60;
@@ -44,6 +45,8 @@ function run(id: string, pilot: (s: BoatState, t: Telemetry | null, time: number
     }
     if (s.capsized) return { res: { won: false, textRu: 'capsize' }, time };
     if (world && isBlocked(world, s.x + Math.sin(s.heading) * 2, s.y + Math.cos(s.heading) * 2) && Math.hypot(s.u, s.v) > 0.8) return { res: { won: false, textRu: `aground at ${s.x.toFixed(0)},${s.y.toFixed(0)}` }, time };
+    const z = world ? zoneAt(world, s.x, s.y) : null;
+    if (z && z.kind !== 'anchorage') return { res: { won: false, textRu: `zone ${z.name} at ${s.x.toFixed(0)},${s.y.toFixed(0)}` }, time };
     const res = rt.update({ s, t, time, dt, events: r.events, marks: rt.marks, counters, world, traffic: null, windFrom: wDeg * DEG });
     if (res) return { res, time };
   }
@@ -136,16 +139,26 @@ describe('missions are completable', () => {
   const ROUTES: Record<string, [number, number][]> = {
     gd_entry: [[-250, 7450], [80, 6600], [150, 6380], [260, 6220], [600, 6040]],
     gd_ncz: [[7740, 2380], [7860, 2150], [7880, 2000], [7865, 1890], [7830, 1830]],
+    gd_ships: [[260, 6220], [150, 6380], [80, 6600], [-250, 7450], [-300, 7750]],
+    chart_shoals: [[-260, -300], [-120, -170], [10, -60], [150, 10], [360, 40]],
+    chart_fairway: [[0, 330]],
   };
   for (const id of Object.keys(ROUTES)) {
     it(`real-chart task ${id} can be sailed without running aground`, () => {
       const m = MISSION_BY_ID[id];
       const marks = m.create().marks;
-      const w = createGdanskWorld();
+      const w = m.chart === 'bay' ? createBayWorld() : createGdanskWorld();
       expect(isBlocked(w, m.start.x, m.start.y)).toBeNull();
       for (const mk of marks) expect(isBlocked(w, mk.x, mk.y), `${mk.label}`).toBeNull();
       const res = run(id, markPilot(ROUTES[id].map(([x, y]) => ({ x, y })), (m.windDeg ?? 0) * DEG, 20), 3000);
       expect(res.res?.won, res.res?.textRu).toBe(true);
     });
   }
+
+  it('the straight line through the bay hits shoals or the rock (pilotage is needed)', () => {
+    const w = createBayWorld();
+    let hit: string | null = null;
+    for (let t = 0; t <= 1 && !hit; t += 0.002) hit = isBlocked(w, -560 + 920 * t, -380 + 420 * t);
+    expect(hit).toBe('shoal');
+  });
 });

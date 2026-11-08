@@ -3,7 +3,7 @@
 
 import { load, save } from '../lib/store';
 
-export type AreaId = 'open' | 'training' | 'gdansk';
+export type AreaId = 'open' | 'training' | 'bay' | 'gdansk';
 export type Gusts = 'auto' | 'none' | 'light' | 'strong';
 export type Visibility = 'clear' | 'haze' | 'fog';
 
@@ -36,6 +36,7 @@ export function saveConditions(c: Conditions): void {
 export const AREA_RU: Record<AreaId, string> = {
   open: 'Открытая вода',
   training: 'Учебная акватория (берег, марина, фарватер, кардинальные знаки)',
+  bay: 'Учебная карта «Песчаная бухта» (мели, фарватер с судами, запретные зоны)',
   gdansk: 'Гданьск — реальная карта (OpenStreetMap)',
 };
 

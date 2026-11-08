@@ -17,7 +17,7 @@ export class HarbourRenderer {
     this.wake = [];
   }
 
-  draw(h: Harbour, s: MotorState, tiller: number, wind: Wind, time: number, zoom: number, showTarget: boolean): void {
+  draw(h: Harbour, s: MotorState, tiller: number, wind: Wind, time: number, zoom: number, showTarget: boolean, cam?: { x: number; y: number }): void {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const rectEl = this.canvas.getBoundingClientRect();
     const w = Math.max(100, rectEl.width), hgt = Math.max(100, rectEl.height);
@@ -28,8 +28,9 @@ export class HarbourRenderer {
     const ctx = this.canvas.getContext('2d')!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const k = Math.max(5, Math.min(w, hgt) / 55) * zoom;
-    const tx = (x: number) => w / 2 + (x - s.x) * k;
-    const ty = (y: number) => hgt / 2 - (y - s.y) * k;
+    const cx = cam?.x ?? s.x, cy = cam?.y ?? s.y;
+    const tx = (x: number) => w / 2 + (x - cx) * k;
+    const ty = (y: number) => hgt / 2 - (y - cy) * k;
     const poly = (p: Pt[]) => { ctx.beginPath(); p.forEach(([x, y], i) => (i ? ctx.lineTo(tx(x), ty(y)) : ctx.moveTo(tx(x), ty(y)))); ctx.closePath(); };
 
     // water (real maps: land background with water polygons on top)
@@ -50,8 +51,8 @@ export class HarbourRenderer {
     }
     ctx.fillStyle = 'rgba(255,255,255,0.12)';
     const step = 6;
-    const x0 = Math.floor((s.x - w / 2 / k) / step) * step, y0 = Math.floor((s.y - hgt / 2 / k) / step) * step;
-    for (let x = x0; x < s.x + w / 2 / k + step; x += step) for (let y = y0; y < s.y + hgt / 2 / k + step; y += step) ctx.fillRect(tx(x) - 1, ty(y) - 1, 2, 2);
+    const x0 = Math.floor((cx - w / 2 / k) / step) * step, y0 = Math.floor((cy - hgt / 2 / k) / step) * step;
+    if (k > 2.5) for (let x = x0; x < cx + w / 2 / k + step; x += step) for (let y = y0; y < cy + hgt / 2 / k + step; y += step) ctx.fillRect(tx(x) - 1, ty(y) - 1, 2, 2);
 
     // wake
     if (Math.abs(s.u) > 0.2) {
@@ -158,7 +159,7 @@ export class HarbourRenderer {
     }
     if (Number.isFinite(this.fogRange)) {
       const r = this.fogRange * k, col = this.night ? '4,10,22' : '196,204,210';
-      const g = ctx.createRadialGradient(w / 2, hgt / 2, r * 0.35, w / 2, hgt / 2, r);
+      const g = ctx.createRadialGradient(tx(s.x), ty(s.y), r * 0.35, tx(s.x), ty(s.y), r);
       g.addColorStop(0, `rgba(${col},0)`); g.addColorStop(1, `rgba(${col},0.97)`);
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, hgt);

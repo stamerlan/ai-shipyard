@@ -33,6 +33,17 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
   let buoyTaken = false;
   let touchingNow = false;
   let zoom = 1;
+  /** Looking around the harbour before the start: the camera is free. */
+  let preview = false;
+  const cam = { x: 0, y: 0 };
+  // Coming from free sailing: harbour and position where the engine was started.
+  const handoff = (() => {
+    try {
+      const raw = sessionStorage.getItem('sailtrainer.handoff');
+      sessionStorage.removeItem('sailtrainer.handoff');
+      return raw ? JSON.parse(raw) as { harbour: string; x: number; y: number; heading: number; windFrom: number; windSpeed: number } : null;
+    } catch { return null; }
+  })();
   const held = new Set<'away' | 'toward'>();
 
   // ---------- DOM ----------
@@ -44,7 +55,26 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
   const hintBox = h('div', { class: 'hints' });
   const toast = h('div', { class: 'toast', style: { opacity: '0' } });
   const overlay = h('div', { class: 'overlay', style: { display: 'none' } });
-  const stage = h('div', { class: 'sim-stage' }, canvas, hudTL, hudTR, objective, hintBox, toast, overlay);
+  const previewBar = h('div', { class: 'preview-bar', style: { display: 'none' } },
+    h('span', null, '🗺 Осмотр: тяните карту, «−/+» или колесо — масштаб. Зелёный пунктир — ваше место.'),
+    h('button', { class: 'btn small', onClick: () => start() }, '▶ Старт'));
+  const stage = h('div', { class: 'sim-stage' }, canvas, hudTL, hudTR, objective, hintBox, toast, previewBar, overlay);
+  // Panning and zooming in the preview.
+  let drag: { x: number; y: number } | null = null;
+  canvas.addEventListener('pointerdown', (e) => { if (preview) { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); } });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!preview || !drag) return;
+    const r = canvas.getBoundingClientRect();
+    const k = Math.max(5, Math.min(r.width, r.height) / 55) * zoom;
+    cam.x -= (e.clientX - drag.x) / k; cam.y += (e.clientY - drag.y) / k;
+    drag = { x: e.clientX, y: e.clientY };
+  });
+  canvas.addEventListener('pointerup', () => { drag = null; });
+  canvas.addEventListener('wheel', (e) => {
+    if (!preview) return;
+    e.preventDefault();
+    zoom = Math.max(0.03, Math.min(3, zoom * (e.deltaY < 0 ? 1.2 : 1 / 1.2)));
+  }, { passive: false });
 
   const missionSel = h('select', { 'aria-label': 'Задание' }, MISSIONS.map((m) => h('option', { value: m.id }, missionLabel(m.id, m.ru))));
   missionSel.value = mission.id;
@@ -58,7 +88,7 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
     missionSel, harbourSel,
     h('button', { class: 'btn secondary small', title: 'Заново (R)', onClick: () => reset(true) }, '⟳'),
     pauseBtn,
-    h('button', { class: 'btn secondary small', title: 'Отдалить', onClick: () => (zoom = Math.max(0.35, zoom / 1.25)) }, '−'),
+    h('button', { class: 'btn secondary small', title: 'Отдалить', onClick: () => (zoom = Math.max(preview ? 0.03 : 0.35, zoom / 1.25)) }, '−'),
     h('button', { class: 'btn secondary small', title: 'Приблизить', onClick: () => (zoom = Math.min(3, zoom * 1.25)) }, '+'),
     h('span', { class: 'keys' }, KEYS.map(([k, t]) => h('span', { style: { marginRight: '8px' } }, h('kbd', null, k), ' ', t))),
   );
@@ -91,18 +121,26 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
 
   // ---------- Game ----------
   function reset(showIntro: boolean): void {
-    harbour = buildHarbour(prefs.harbour === 'random' ? null : prefs.harbour);
+    harbour = buildHarbour(handoff ? handoff.harbour : prefs.harbour === 'random' ? null : prefs.harbour);
+    if (handoff) harbourSel.value = handoff.harbour;
+    if (handoff && !leaving) {
+      const p = { x: handoff.x, y: handoff.y, heading: handoff.heading };
+      if (!touching(harbour, p)) harbour.arrival = p;
+    }
     const t = harbour.target;
-    s = leaving ? motorInit(t) : motorInit(harbour.arrival, 1.1);
+    // Start with the engine in neutral and no way on.
+    s = leaving ? motorInit(t) : motorInit(harbour.arrival, 0);
     // The helmsman starts on the side facing the open water (or starboard).
     s.helmSide = 1;
     const bft = cond.bft === 'auto' ? 2 + Math.floor(Math.random() * 3) : resolveBft(cond, 3);
     const dir = cond.windDir === 'auto' ? Math.floor(Math.random() * 8) * 45 : resolveWindDir(cond);
-    wind = { from: dir * DEG, speed: BEAUFORT_MS[bft] };
+    wind = handoff && !leaving ? { from: handoff.windFrom, speed: handoff.windSpeed } : { from: dir * DEG, speed: BEAUFORT_MS[bft] };
     renderer.night = cond.night === 'night';
     renderer.fogRange = VIS_RANGE[cond.vis];
     tiller = 0; tillerCmd = 0; time = 0; finished = false; touches = 0; hold = 0; buoyTaken = false; tel = null;
     zoom = 1;
+    preview = false;
+    previewBar.style.display = 'none';
     renderer.reset();
     held.clear();
     if (showIntro) intro(bft); else { overlay.style.display = 'none'; paused = false; }
@@ -150,8 +188,36 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
       conditionsBlock(),
       h('p', { class: 'small muted' }, 'Касание на скорости до ~1 узла — это кранцы (засчитывается как касание); быстрее — удар.'),
       h('p', { class: 'keys' }, KEYS.map(([k, t]) => h('span', { style: { marginRight: '10px', display: 'inline-block' } }, h('kbd', null, k), ' ', t))),
-      h('button', { class: 'btn', onClick: () => { overlay.style.display = 'none'; paused = false; pauseBtn.textContent = '⏸'; } }, 'Старт'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', onClick: () => start() }, 'Старт'),
+        h('button', { class: 'btn secondary', onClick: () => startPreview() }, '🗺 Осмотреть марину')),
     ));
+  }
+
+  function start(): void {
+    overlay.style.display = 'none';
+    previewBar.style.display = 'none';
+    preview = false;
+    zoom = 1;
+    paused = false;
+    pauseBtn.textContent = '⏸';
+  }
+
+  /** Free camera over the whole harbour: drag to pan, wheel or +/− to zoom. */
+  function startPreview(): void {
+    overlay.style.display = 'none';
+    preview = true;
+    paused = true;
+    const b = harbour.bounds;
+    // Centre between the boat and the berth, zoomed so both are well in view.
+    const t = harbour.target;
+    cam.x = (s.x + t.x) / 2; cam.y = (s.y + t.y) / 2;
+    const r = canvas.getBoundingClientRect();
+    const base = Math.max(5, Math.min(r.width, r.height) / 55);
+    const span = Math.max(60, Math.hypot(s.x - t.x, s.y - t.y) * 1.6);
+    zoom = Math.max(0.04, Math.min(1, Math.min(r.width, r.height) / span / base));
+    void b;
+    previewBar.style.display = '';
   }
 
   function finish(won: boolean, text: string): void {
@@ -167,6 +233,7 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
       h('div', { class: 'row' },
         h('button', { class: 'btn', onClick: () => reset(false) }, 'Ещё раз (новое место и ветер)'),
         h('button', { class: 'btn secondary', onClick: () => { location.hash = `#/sim?m=${leaving ? 'moor' : 'unmoor'}`; } }, leaving ? 'Швартовка' : 'Отход'),
+        handoff ? h('a', { class: 'btn secondary', href: '#/sim?m=free' }, '⛵ Назад в свободное плавание') : null,
       )));
   }
 
@@ -277,7 +344,7 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
     last = now;
     if (!paused) update(dt);
     if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) toast.style.opacity = '0'; }
-    renderer.draw(harbour, s, tiller, wind, time, zoom, !leaving);
+    renderer.draw(harbour, s, tiller, wind, time, zoom, !leaving, preview ? cam : undefined);
     hudTimer -= dt;
     if (hudTimer <= 0) { hudTimer = 0.12; hud(); }
     raf = requestAnimationFrame(frame);

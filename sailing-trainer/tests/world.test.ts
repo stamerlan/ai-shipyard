@@ -83,3 +83,31 @@ describe('Gdańsk chart for free sailing', () => {
     expect(isBlocked(g, 3000, 8500)).toBeNull(); // Gulf of Gdańsk
   });
 });
+
+import { createBayWorld } from '../src/sim/charts';
+
+describe('cargo ships on fairways', () => {
+  it('ships follow the lane and warn a boat that blocks their way', () => {
+    const w = createBayWorld();
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const tr = new Traffic(0, w, rnd, 1);
+    // A boat lying still in the middle of the channel, east of the ship's start.
+    const s = initialState(0, 0, 130, 0, 0);
+    tr.update(0.1, s, 0);
+    const ship = tr.vessels[0];
+    expect(ship?.lane).toBeTruthy();
+    let warned = false;
+    for (let t = 0; t < 600 && !warned; t += 0.1) {
+      for (const e of tr.update(0.1, s, 0)) if (e.kind === 'violation') warned = true;
+      // never leaves the channel
+      expect(Math.abs(ship.y - 150)).toBeLessThan(40);
+    }
+    expect(warned).toBe(true);
+  });
+  it('moored ships are obstacles', () => {
+    const w = createBayWorld();
+    const sh = w.mooredShips![0];
+    expect(isBlocked(w, sh.x, sh.y)).toBe('ship');
+  });
+});

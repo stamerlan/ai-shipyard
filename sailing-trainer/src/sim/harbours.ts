@@ -115,7 +115,13 @@ interface RealCfg {
   /** Only berths inside marina outlines (bow-to marinas). */
   insideMarinas?: boolean;
   labels?: { x: number; y: number; text: string }[];
+  /** Boxes [x0, y0, x1, y1] where the shore itself is a quay wall to moor alongside. */
+  quays?: [number, number, number, number][];
+  /** Only berths inside this box [x0, y0, x1, y1]. */
+  area?: [number, number, number, number];
 }
+
+const inBox = (x: number, y: number, b: [number, number, number, number]) => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
 
 function realHarbour(cfg: RealCfg): HarbourLayout {
   const d = cfg.data;
@@ -149,6 +155,21 @@ function realHarbour(cfg: RealCfg): HarbourLayout {
       faces.push({ a, b, nx, ny });
     }
   }
+  for (const box of cfg.quays ?? []) {
+    for (const ring of d.water) {
+      for (let i = 0; i < ring.length; i++) {
+        const a = ring[i], b = ring[(i + 1) % ring.length];
+        const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+        if (L < 10 || !inBox(mx, my, box)) continue;
+        let nx = (b[1] - a[1]) / L, ny = -(b[0] - a[0]) / L;
+        const wet = (k: number) => index.contains(mx + nx * k, my + ny * k);
+        if (!wet(2)) { nx = -nx; ny = -ny; }
+        if (!wet(2)) continue;
+        faces.push({ a, b, nx, ny });
+      }
+    }
+  }
   const pBoxes = pontoons.map((p) => {
     const xs = p.map((q) => q[0]), ys = p.map((q) => q[1]);
     return [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
@@ -158,7 +179,7 @@ function realHarbour(cfg: RealCfg): HarbourLayout {
   const blocked = (x: number, y: number) => !index.contains(x, y) || onPontoon(x, y);
   const poseBlocked = (x: number, y: number, h: number, padB = 0, padL = 0) =>
     samplePose(x, y, h, YACHT.halfB + padB, YACHT.halfL + padL).some(([px, py]) => blocked(px, py));
-  const inMarina = (x: number, y: number) => !cfg.insideMarinas || d.marinas.some((m) => pointInPoly(x, y, m));
+  const inMarina = (x: number, y: number) => (!cfg.area || inBox(x, y, cfg.area)) && (!cfg.insideMarinas || d.marinas.some((m) => pointInPoly(x, y, m)));
 
   const slots: Slot[] = [];
   // Spatial hash of berths already placed (cells of 10 m), so overlap tests stay local.
@@ -287,6 +308,16 @@ export const HARBOURS: { id: string; nameRu: string; make: () => HarbourLayout }
       placeRu: 'Реальная акватория: главный понтон вдоль набережной Шафарни, поперечные пирсы, напротив — Остров Спихлежей, на севере — разводной мост и плёс у Оловянки. Слабое течение на север.',
       mooringRu: 'Лагом (бортом) к понтону. Идите вдоль стоящих яхт в 3–4 м от них; когда корма пройдёт соседа — поворачивайте к понтону под 25–30°. У места: нейтраль, румпель — чтобы корма подошла к понтону, ход гасите малым задним. Лучше подходить против течения.',
       labels: [{ x: -95, y: 60, text: 'Оловянка' }, { x: -60, y: -150, text: 'Остров Спихлежей' }, { x: 45, y: -120, text: 'Шафарня' }],
+    }),
+  },
+  {
+    id: 'gdansk_old', nameRu: 'Гданьск — Старый город, Мотлава (лагом)', make: () => realHarbour({
+      id: 'gdansk_old', data: GDANSK_MARINA, mooring: 'alongside', current: { x: 0.03, y: 0.1 },
+      quays: [[-345, -250, -110, 45]], area: [-345, -335, -110, 45],
+      nameRu: 'Гданьск — Старый город (Мотлава у Зелёного моста)',
+      placeRu: 'Реальная акватория: Мотлава в самом центре — набережная Długie Pobrzeże (Старый город) и Остров Спихлежей, на юге — Зелёный мост и Зелёные ворота; за мостом на острове улица Chmielna (паб Whiskey in the Jar). Река узкая, ходят прогулочные суда, слабое течение на север. Места у стенки и пирсов — учебные.',
+      mooringRu: 'Лагом к стенке. Идите вдоль набережной в 3–4 м от стоящих яхт; когда корма пройдёт соседа — к стенке под 25–30°. У места: нейтраль, румпелем подведите корму, ход гасите малым задним. Подходите против течения (носом на юг).',
+      labels: [{ x: -330, y: -110, text: 'Długie Pobrzeże' }, { x: -170, y: -190, text: 'Остров Спихлежей' }, { x: -205, y: -300, text: 'Chmielna · Whiskey in the Jar' }, { x: -335, y: -285, text: 'Зелёные ворота' }],
     }),
   },
   {

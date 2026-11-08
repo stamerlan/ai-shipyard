@@ -39,6 +39,27 @@ export interface Gate {
   yMax: number;
 }
 
+export type ZoneKind = 'prohibited' | 'swim' | 'anchorage';
+
+export interface Zone {
+  kind: ZoneKind;
+  poly: Pt[];
+  name: string;
+}
+
+/** A large vessel at anchor or alongside a quay (an obstacle). */
+export interface ShipPose {
+  x: number;
+  y: number;
+  heading: number;
+  halfL: number;
+  halfB: number;
+}
+
+export interface ShipLane {
+  pts: Pt[];
+}
+
 export interface World {
   land: Pt[][];
   shoals: Shoal[];
@@ -56,6 +77,16 @@ export interface World {
   marinaOutlines?: Pt[][];
   labels?: { x: number; y: number; text: string }[];
   attribution?: string;
+  /** Prohibited areas, swimming areas, anchorages. */
+  zones?: Zone[];
+  /** Ships at anchor or alongside. */
+  mooredShips?: ShipPose[];
+  /** Fairways used by cargo ships (they follow these lines, both ways). */
+  shipLanes?: ShipLane[];
+  /** How many cargo ships move along the lanes. */
+  laneShips?: number;
+  /** Chart name for the intro. */
+  nameRu?: string;
 }
 
 const GATE_XS = [-250, -200, -150, -100];
@@ -111,8 +142,23 @@ export function pointInPoly(x: number, y: number, poly: Pt[]): boolean {
 }
 
 /** Is this point on land, on a shoal or on a pontoon? */
-export function isBlocked(w: World, x: number, y: number): 'land' | 'shoal' | 'pontoon' | null {
+export type BlockKind = 'land' | 'shoal' | 'pontoon' | 'ship';
+
+export function inShip(sh: ShipPose, x: number, y: number, pad = 0): boolean {
+  const dx = x - sh.x, dy = y - sh.y;
+  const along = dx * Math.sin(sh.heading) + dy * Math.cos(sh.heading);
+  const across = dx * Math.cos(sh.heading) - dy * Math.sin(sh.heading);
+  return Math.abs(along) < sh.halfL + pad && Math.abs(across) < sh.halfB + pad;
+}
+
+export function zoneAt(w: World, x: number, y: number): Zone | null {
+  for (const z of w.zones ?? []) if (pointInPoly(x, y, z.poly)) return z;
+  return null;
+}
+
+export function isBlocked(w: World, x: number, y: number): BlockKind | null {
   if (w.waterIndex && !w.waterIndex.contains(x, y)) return 'land';
+  for (const sh of w.mooredShips ?? []) if (inShip(sh, x, y)) return 'ship';
   for (const p of w.pontoons) if (x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h) return 'pontoon';
   for (const s of w.shoals) if (Math.hypot(x - s.x, y - s.y) < s.r) return 'shoal';
   for (const poly of w.land) if (pointInPoly(x, y, poly)) return 'land';

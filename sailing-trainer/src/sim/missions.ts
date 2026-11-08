@@ -42,6 +42,10 @@ export interface MissionDef {
   start: { x: number; y: number; heading: number; speed: number; main: number };
   /** Coast, marina, marks and lighthouses. */
   world?: boolean;
+  /** Fixed fictional training chart. */
+  chart?: 'bay';
+  /** Cargo ships on the fairways of the chart. */
+  laneShips?: number;
   night?: boolean;
   /** Number of other vessels. */
   traffic?: number;
@@ -89,6 +93,21 @@ function courseRuntime(marks: Mark[], radius: number, intro: string): MissionRun
       }
       return null;
     },
+  };
+  return rt;
+}
+
+/** Fail on collision; at the finish, any impeding of ships means the exercise is not passed. */
+function withTrafficRules(rt: MissionRuntime): MissionRuntime {
+  const base = rt.update.bind(rt);
+  rt.update = (ctx) => {
+    const tr = ctx.traffic;
+    if (tr && tr.collisions > 0) return { won: false, textRu: 'Столкновение с судном! Крупное судно в фарватере не может отвернуть и быстро остановиться — уходите с его пути заранее.' };
+    const res = base(ctx);
+    if (res?.won && tr && tr.violations > 0) {
+      return { won: false, textRu: `Финиш пройден, но вы мешали проходу судов: ${tr.violations} раз(а). Пропускайте суда в фарватере и пересекайте его за кормой.` };
+    }
+    return res;
   };
   return rt;
 }
@@ -272,6 +291,49 @@ export const MISSIONS: MissionDef[] = [
       { x: 7860, y: 2150, kind: 'mark', label: 'Устье' },
       { x: 7830, y: 1830, kind: 'finish', label: 'NCŻ' },
     ], 40, 'Войдите в устье, оставив мол слева'),
+  },
+  {
+    id: 'gd_ships', ru: 'Гданьск: выход из порта среди судов', en: 'Gdańsk: leaving port with shipping', beaufort: 3, gusts: 0.2, shifts: 5 * DEG,
+    realMap: true, windDeg: 90, laneShips: 3,
+    descRu: 'Реальная карта. От Вестерплатте выйдите в море по фарватеру порта Гданьск. По фарватеру ходят грузовые суда — они не могут уйти с него. Держитесь правой кромки фарватера (МППСС, правило 9), не мешайте их проходу и не пересекайте курс у них перед носом. Вдоль причалов стоят суда — обходите с запасом.',
+    start: { x: 600, y: 6040, heading: 300 * DEG, speed: 2, main: 0.3 },
+    create() {
+      const rt = courseRuntime([
+        { x: 80, y: 6600, kind: 'mark', label: 'Выход' },
+        { x: -300, y: 7750, kind: 'finish', label: 'Море' },
+      ], 45, 'Выйдите из порта');
+      return withTrafficRules(rt);
+    },
+  },
+  {
+    id: 'chart_shoals', ru: 'Учебная карта: проход среди мелей', en: 'Training chart: pilotage among shoals', beaufort: 3, gusts: 0.15, shifts: 4 * DEG,
+    chart: 'bay',
+    descRu: '«Песчаная бухта» (выдуманная учебная карта). Дойдите до финиша на северо-востоке. На пути — мель с четырьмя кардинальными знаками, камень с знаком отдельной опасности (обходить можно с любой стороны, но не вплотную), мель с северным знаком (проходите севернее). Юго-восточнее — полигон, огороженный жёлтыми знаками: вход запрещён.',
+    start: { x: -560, y: -380, heading: 70 * DEG, speed: 2, main: 0.5 },
+    create: () => courseRuntime([{ x: 360, y: 40, kind: 'finish', label: 'Финиш' }], 15, 'Дойдите до финиша, не задев мели и не заходя на полигон'),
+  },
+  {
+    id: 'chart_fairway', ru: 'Учебная карта: пересечение судоходного фарватера', en: 'Training chart: crossing a shipping channel', beaufort: 3, gusts: 0.1, shifts: 0,
+    chart: 'bay', windDeg: 270, laneShips: 3,
+    descRu: '«Песчаная бухта». Пересеките огороженный буями фарватер, по которому идут грузовые суда, и дойдите до знака на севере. Пересекайте под прямым углом и быстро; не мешайте судам, которые могут идти только по фарватеру (МППСС, правило 9) — пропустите судно и проходите за кормой. Севернее — якорная стоянка: суда на якоре обходите с запасом.',
+    start: { x: 0, y: -20, heading: 0, speed: 2, main: 0.5 },
+    create() {
+      const rt = withTrafficRules(courseRuntime([{ x: 0, y: 330, kind: 'finish', label: 'Знак' }], 15, 'Пересеките фарватер'));
+      // Crossing angle: from where we enter the channel to where we leave it.
+      let entry: { x: number; y: number } | null = null;
+      const base = rt.update.bind(rt);
+      rt.update = (ctx) => {
+        const inside = ctx.s.y > 105 && ctx.s.y < 195;
+        if (inside && !entry) entry = { x: ctx.s.x, y: ctx.s.y };
+        if (!inside && entry) {
+          const ang = Math.abs(Math.atan2(ctx.s.x - entry.x, Math.abs(ctx.s.y - entry.y))) / DEG;
+          entry = null;
+          if (ang > 35 && ctx.s.y > 195) return { won: false, textRu: `Фарватер пересечён под углом ${Math.round(ang)}° к перпендикуляру. Пересекайте как можно ближе к прямому углу — так вы быстрее освобождаете фарватер и судам понятно ваше намерение.` };
+        }
+        return base(ctx);
+      };
+      return rt;
+    },
   },
   {
     id: 'moor', ru: 'Швартовка в марине (мотор)', en: 'Mooring under engine', beaufort: 3, gusts: 0, shifts: 0, motor: true,
