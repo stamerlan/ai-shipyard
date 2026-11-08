@@ -265,10 +265,18 @@ export const HARBOURS: { id: string; nameRu: string; make: () => HarbourLayout }
 
 const COLORS = ['#ffffff', '#f4f1e8', '#e8eef4', '#1f3b5a', '#ffffff', '#c9d6df', '#8a1f1f', '#ffffff'];
 
+const layoutCache = new Map<string, HarbourLayout>();
+/** Layouts are deterministic (real maps take a moment to process), so build each one once. */
+function layoutOf(def: { id: string; make: () => HarbourLayout }): HarbourLayout {
+  let l = layoutCache.get(def.id);
+  if (!l) { l = def.make(); layoutCache.set(def.id, l); }
+  return l;
+}
+
 /** Build a harbour with a random free berth; all other berths are taken by moored yachts. */
 export function buildHarbour(id: string | null, rnd: () => number = Math.random): Harbour {
   const def = HARBOURS.find((h) => h.id === id) ?? HARBOURS[Math.floor(rnd() * HARBOURS.length)];
-  const lay = def.make();
+  const lay = layoutOf(def);
   // Choose a target berth away from the very ends, plus a couple of other empty berths.
   const candidates = lay.slots.filter((_, i) => i > 1 && i < lay.slots.length - 2);
   const target = candidates[Math.floor(rnd() * candidates.length)];
