@@ -6,6 +6,8 @@ export interface Scene {
   world: World | null;
   vessels: AIVessel[];
   night: boolean;
+  /** Free camera (chart view); default follows the boat. */
+  cam?: { x: number; y: number };
 }
 
 export interface Mark {
@@ -36,6 +38,7 @@ export class Renderer {
   showNoGo = true;
   /** Visibility in metres (Infinity = clear). */
   fogRange = Infinity;
+  lastView: View | null = null;
   private paths = new WeakMap<World, Path2D>();
 
   constructor(private canvas: HTMLCanvasElement) {}
@@ -62,7 +65,8 @@ export class Renderer {
     const { w, h } = this.resize();
     const ctx = this.canvas.getContext('2d')!;
     const k = Math.max(9, Math.min(w, h) / 30) * zoom;
-    const v: View = { ctx, w, h, k, camX: s.x, camY: s.y };
+    const v: View = { ctx, w, h, k, camX: scene.cam?.x ?? s.x, camY: scene.cam?.y ?? s.y };
+    this.lastView = v;
 
     // Water
     const gust = Math.max(0, wind.gust ?? 0);
@@ -83,7 +87,7 @@ export class Renderer {
     this.drawWindParticles(v, wind, dt);
     this.updateWake(s, dt);
     this.drawWake(v);
-    if (this.showNoGo && !scene.night) this.drawNoGo(v, s, wind);
+    if (this.showNoGo && !scene.night && !c.sailsDown) this.drawNoGo(v, s, wind);
     for (const m of marks) this.drawMark(v, m, time);
     for (const vs of scene.vessels) this.drawVessel(v, vs, wind.from, time);
     if (scene.night) {
@@ -94,12 +98,12 @@ export class Renderer {
       for (const m of marks) this.drawMark(v, m, time);
       ctx.globalAlpha = 1;
     }
-    if (Number.isFinite(this.fogRange)) this.drawFog(v, scene.night);
+    if (Number.isFinite(this.fogRange) && !scene.cam) this.drawFog(v, scene.night);
     this.drawBoat(v, s, c, t, time);
     if (k < 4) {
       // Zoomed out on a big chart: a plotter-style arrow so the boat stays visible.
       ctx.save();
-      ctx.translate(w / 2, h / 2);
+      ctx.translate(...this.toScreen(v, s.x, s.y));
       ctx.rotate(s.heading);
       ctx.fillStyle = '#ffeb3b'; ctx.strokeStyle = '#222'; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.moveTo(0, -11); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8); ctx.closePath(); ctx.fill(); ctx.stroke();
@@ -180,7 +184,8 @@ export class Renderer {
     const { ctx, w, h, k } = v;
     const r = this.fogRange * k;
     const col = night ? '4,10,22' : '196,204,210';
-    const g = ctx.createRadialGradient(w / 2, h / 2, r * 0.35, w / 2, h / 2, r);
+    const [bx, by] = this.toScreen(v, v.camX, v.camY);
+    const g = ctx.createRadialGradient(bx, by, r * 0.35, bx, by, r);
     g.addColorStop(0, `rgba(${col},0)`);
     g.addColorStop(1, `rgba(${col},0.97)`);
     ctx.fillStyle = g;
@@ -599,7 +604,7 @@ export class Renderer {
       ctx.strokeStyle = '#f2c6a0'; ctx.lineWidth = Math.max(2, 0.12 * k);
       ctx.beginPath(); ctx.moveTo(x + 0.3 * k, y + bob); ctx.lineTo(x + 0.75 * k, y - 0.6 * k + Math.sin(time * 6) * 0.2 * k); ctx.stroke();
     } else {
-      const r = (m.kind === 'buoy' ? 0.6 : 0.8) * k;
+      const r = Math.max(6, (m.kind === 'buoy' ? 0.6 : 0.8) * k);
       ctx.fillStyle = m.done ? '#8fd18f' : m.kind === 'finish' ? '#ffd23f' : '#ff8c1a';
       ctx.strokeStyle = 'rgba(0,0,0,0.4)';
       ctx.lineWidth = 1.5;
@@ -614,7 +619,9 @@ export class Renderer {
       ctx.fillStyle = '#fff';
       ctx.font = `600 ${Math.max(11, k * 0.9)}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
-      ctx.fillText(m.label, x, y - 1.3 * k);
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.strokeText(m.label, x, y - Math.max(10, 1.3 * k));
+      ctx.fillText(m.label, x, y - Math.max(10, 1.3 * k));
     }
   }
 
@@ -703,6 +710,32 @@ export class Renderer {
 
     const mastY = -L / 2 + BOAT.mastFromBow * k;
     const flowX = t ? -Math.sin(t.awa) : 0, flowY = t ? Math.cos(t.awa) : 1;
+    if (c.sailsDown) {
+      // Sails lowered and furled on the boom; outboard on the transom.
+      ctx.strokeStyle = '#555';
+      ctx.lineWidth = Math.max(3, 0.18 * k);
+      ctx.beginPath(); ctx.moveTo(0, mastY); ctx.lineTo(0, mastY + BOAT.boomLength * k); ctx.stroke();
+      ctx.fillStyle = '#333';
+      ctx.beginPath(); ctx.arc(0, mastY, Math.max(2.5, 0.12 * k), 0, Math.PI * 2); ctx.fill();
+      const eng = c.engine ?? 0;
+      ctx.save();
+      ctx.translate(0.35 * k, L / 2);
+      ctx.rotate(-c.tiller * 30 * DEG);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(-0.15 * k, -0.25 * k, 0.3 * k, 0.55 * k);
+      if (Math.abs(eng) > 0.05) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+        ctx.lineWidth = 2;
+        const dir = Math.sign(eng);
+        for (let i = 0; i < 3; i++) {
+          const yy = 0.4 * k + i * 0.35 * k + ((time * 6) % 1) * 0.35 * k;
+          ctx.beginPath(); ctx.arc(0, dir > 0 ? yy : -yy - 0.6 * k, 0.12 * k * (1 + i * 0.6), 0, Math.PI * 2); ctx.stroke();
+        }
+      }
+      ctx.restore();
+      ctx.restore();
+      return;
+    }
 
     // jib
     const tackY = -L / 2 + 0.2 * k;

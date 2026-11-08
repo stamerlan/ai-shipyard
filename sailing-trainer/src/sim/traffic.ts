@@ -65,6 +65,8 @@ export class Traffic {
   violations = 0;
   collisions = 0;
   private laneCount: number;
+  /** The player's boat: sailing, or under engine (then a power-driven vessel). */
+  ownType: 'sail' | 'motor' = 'sail';
   private laneSpawned = 0;
 
   constructor(public count: number, private world: World | null, private rnd: () => number = Math.random, laneShips?: number) {
@@ -128,7 +130,7 @@ export class Traffic {
   }
 
   private ownVessel(s: BoatState): RuleVessel {
-    return { x: s.x, y: s.y, heading: s.heading, type: 'sail', speed: Math.max(0.3, Math.hypot(s.u, s.v)) };
+    return { x: s.x, y: s.y, heading: s.heading, type: this.ownType, speed: Math.max(0.3, Math.hypot(s.u, s.v)) };
   }
 
   private spawn(s: BoatState, windFrom: number): void {

@@ -57,6 +57,16 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   let windDeg = 0;
   let bft = 3;
   let speedMul = 1;
+  // Free sailing: under the outboard with the sails down.
+  let motor = false;
+  let throttleIdx = 2;
+  const THROTTLE = [-0.6, -0.3, 0, 0.25, 0.5, 1];
+  const THROTTLE_LABEL = ['Полный назад', 'Малый назад', 'Нейтраль', 'Малый вперёд', 'Средний вперёд', 'Полный вперёд'];
+  // Chart view with your own marks (targets for free sailing).
+  let mapMode = false;
+  let mapZoomBack = 1;
+  const mapCam = { x: 0, y: 0 };
+  let userMarks: Mark[] = [];
   let safeTrail: { x: number; y: number; heading: number }[] = [];
   let safeTimer = 0;
   const held = new Set<Hold>();
@@ -71,7 +81,42 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   const hintBox = h('div', { class: 'hints' });
   const toast = h('div', { class: 'toast', style: { opacity: '0' } });
   const overlay = h('div', { class: 'overlay', style: { display: 'none' } });
-  const stage = h('div', { class: 'sim-stage' }, canvas, hudTL, hudTR, hudBL, objective, hintBox, toast, overlay);
+  const mapHint = h('span');
+  const mapBar = h('div', { class: 'preview-bar', style: { display: 'none' } }, mapHint,
+    h('button', { class: 'btn small secondary', onClick: () => { userMarks = []; saveMarks(); } }, 'Убрать отметки'),
+    h('button', { class: 'btn small', onClick: () => closeMap() }, '✕ Закрыть'));
+  const stage = h('div', { class: 'sim-stage' }, canvas, hudTL, hudTR, hudBL, objective, hintBox, toast, mapBar, overlay);
+  // Chart view: drag to pan, tap to set or remove a mark.
+  let drag: { x: number; y: number; moved: number } | null = null;
+  canvas.addEventListener('pointerdown', (e) => { if (mapMode) { drag = { x: e.clientX, y: e.clientY, moved: 0 }; canvas.setPointerCapture(e.pointerId); } });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!mapMode || !drag) return;
+    const k = renderer.lastView?.k ?? 10;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+    mapCam.x -= dx / k; mapCam.y += dy / k;
+    drag.x = e.clientX; drag.y = e.clientY;
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    if (!mapMode || !drag) return;
+    const wasClick = drag.moved < 8;
+    drag = null;
+    const v = renderer.lastView;
+    if (!wasClick || !v) return;
+    const r = canvas.getBoundingClientRect();
+    const sx = e.clientX - r.left, sy = e.clientY - r.top;
+    const x = v.camX + (sx - v.w / 2) / v.k, y = v.camY - (sy - v.h / 2) / v.k;
+    const hit = userMarks.findIndex((m) => Math.hypot(m.x - x, m.y - y) * v.k < 22);
+    if (hit >= 0) userMarks.splice(hit, 1);
+    else if (mission.id === 'free') userMarks.push({ x, y, kind: 'mark' });
+    relabelMarks();
+    saveMarks();
+  });
+  canvas.addEventListener('wheel', (e) => {
+    if (!mapMode) return;
+    e.preventDefault();
+    zoom = Math.max(0.012, Math.min(3, zoom * (e.deltaY < 0 ? 1.25 : 1 / 1.25)));
+  }, { passive: false });
 
   const missionSel = h('select', { 'aria-label': 'Задание' }, MISSIONS.map((m) => h('option', { value: m.id }, missionLabel(m.id, m.ru))));
   const syncMissionLabels = () => { for (const o of missionSel.options) o.textContent = missionLabel(o.value, MISSION_BY_ID[o.value].ru); };
@@ -88,9 +133,10 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     missionSel,
     h('button', { class: 'btn secondary small', title: 'Заново (R)', onClick: () => reset(true) }, '⟳'),
     pauseBtn,
-    h('button', { class: 'btn secondary small', title: 'Отдалить', onClick: () => (zoom = Math.max(world?.water ? 0.012 : 0.3, zoom / (world?.water ? 1.6 : 1.25))) }, '−'),
-    h('button', { class: 'btn secondary small', title: 'Приблизить', onClick: () => (zoom = Math.min(3, zoom * (world?.water ? 1.6 : 1.25))) }, '+'),
+    h('button', { class: 'btn secondary small', title: 'Отдалить', onClick: () => (zoom = Math.max(world?.water || mapMode ? 0.012 : 0.3, zoom / (world?.water || mapMode ? 1.6 : 1.25))) }, '−'),
+    h('button', { class: 'btn secondary small', title: 'Приблизить', onClick: () => (zoom = Math.min(3, zoom * (world?.water || mapMode ? 1.6 : 1.25))) }, '+'),
     speedBtn,
+    h('button', { class: 'btn secondary small', title: 'Карта и отметки', onClick: () => (mapMode ? closeMap() : openMap()) }, '🗺'),
     h('button', { class: 'btn secondary small', title: 'Условия и настройки', onClick: () => showSettings() }, '⚙'),
     h('span', { class: 'keys' }, KEYS_HELP.map(([k, t]) => h('span', { style: { marginRight: '8px' } }, h('kbd', null, k), ' ', t))),
   );
@@ -109,8 +155,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     b.addEventListener('contextmenu', (e) => e.preventDefault());
     return { el: b, update };
   };
-  const awayBtn = holdBtn('away', () => [simple() ? '⤴ Привестись' : '◀ От себя', 'A']);
-  const towardBtn = holdBtn('toward', () => [simple() ? 'Увалиться ⤵' : 'К себе ▶', 'D']);
+  const awayBtn = holdBtn('away', () => [simple() ? (motor ? '◀ Нос влево' : '⤴ Привестись') : '◀ От себя', 'A']);
+  const towardBtn = holdBtn('toward', () => [simple() ? (motor ? 'Нос вправо ▶' : 'Увалиться ⤵') : 'К себе ▶', 'D']);
   const mainOut = holdBtn('mainOut', () => ['Потравить', '↓']);
   const mainIn = holdBtn('mainIn', () => ['Выбрать', '↑']);
   const jibOut = holdBtn('jibOut', () => ['Потравить', 'S']);
@@ -123,6 +169,12 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   const syncJibButtons = () => { jibIn.el.disabled = jibOut.el.disabled = prefs.linkJib; };
   syncJibButtons();
   const sideBtn = h('button', { class: 'btn side-btn', onClick: () => doSwitch() }, '⇄ Смена борта (Enter)');
+  const motorBtn = h('button', { class: 'btn motor-btn', title: 'M', onClick: () => setMotor(!motor) });
+  const thrInfo = h('div', { class: 'ctl-val' });
+  const thrBtn = (label: string, key: string, d: number) => h('button', { class: 'hold', onClick: () => stepThrottle(d) }, label, h('span', { class: 'kh' }, ` (${key})`));
+  const thrRow = h('div', { class: 'ctl-row r-motor', style: { display: 'none' } },
+    h('div', { class: 'ctl-name' }, 'Мотор', h('button', { class: 'btn secondary small', style: { marginTop: '2px' }, onClick: () => stepThrottle(0) }, 'Нейтраль', h('span', { class: 'kh' }, ' (N)'))),
+    thrBtn('◀ Назад', '↓', -1), thrInfo, thrBtn('Вперёд ▶', '↑', 1));
   const stateBox = h('div', { class: 'sail-state' });
   // Free sailing near a marina: drop the sails and continue under engine to a berth.
   const engineBox = h('div', { class: 'engine-box' });
@@ -134,7 +186,9 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     row('r-tiller', 'Румпель', awayBtn.el, tillerInfo, towardBtn.el),
     row('r-main', 'Грот', mainOut.el, mainInfo, mainIn.el),
     row('r-jib', 'Стаксель', jibOut.el, jibInfo, jibIn.el, h('label', { class: 'link' }, linkCb, ' с гротом')),
+    thrRow,
     h('div', { class: 'ctl-row side-row' }, sideBtn, stateBox),
+    h('div', { class: 'mode-row' }, motorBtn),
     engineBox,
   );
 
@@ -146,6 +200,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     area = mission.realMap ? 'gdansk' : mission.chart ?? (mission.world ? 'training' : isFree ? cond.freeArea : cond.area === 'gdansk' ? 'gdansk' : 'open');
     world = area === 'gdansk' ? createGdanskWorld() : area === 'training' ? createWorld() : area === 'bay' ? createBayWorld() : null;
     lastZone = null;
+    mapMode = false;
+    mapBar.style.display = 'none';
     night = cond.night === 'night' || (cond.night === 'auto' && !!mission.night);
     renderer.fogRange = VIS_RANGE[cond.vis];
     const tcount = mission.traffic ?? (isFree ? prefs.freeTraffic : 0);
@@ -196,6 +252,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       Object.assign(s, keep, { v: 0, r: 0, heel: 0 });
     }
     held.clear();
+    setMotor(false, true);
+    loadMarks();
     awayBtn.update(); towardBtn.update();
     if (showIntro) intro(); else { overlay.style.display = 'none'; paused = false; pauseBtn.textContent = '⏸'; }
   }
@@ -219,7 +277,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
         world ? h('li', null, 'Не выходите на берег и мели. Мини-карта справа — как картплоттер.') : null,
         world?.zones ? h('li', null, 'Красная штрихпунктирная граница — запретный район, жёлтая — зона купания (судам вход запрещён), фиолетовая — якорная стоянка.') : null,
         world?.shipLanes ? h('li', null, 'Розовый пунктир — ось судоходного фарватера. Грузовые суда идут только по нему и не могут уступить: не мешайте им (МППСС, правило 9), пересекайте фарватер под прямым углом и за кормой судна.') : null,
-        mission.id === 'free' && area === 'gdansk' ? h('li', null, 'У марин Гданьска (Старый город, Шафарня, NCŻ) появится кнопка «⚙ На мотор» — уберите паруса и идите к причалу под мотором.') : null,
+        mission.id === 'free' ? h('li', null, '«⚙ Мотор» (M) — убрать паруса и идти под подвесным мотором (↑/↓ — газ, N — нейтраль), например по каналам; «⛵ Поставить паруса» — обратно. 🗺 — карта: двигайте её и ставьте отметки-цели.') : null,
+        mission.id === 'free' && area === 'gdansk' ? h('li', null, 'У Марины Гданьск (Шафарня) и NCŻ появится кнопка «⚓ Швартовка» — переход к швартовке на своё место.') : null,
         area === 'bay' ? h('li', null, 'Учебная карта выдуманная (как учебные карты RYA) — для тренировки, не для навигации.') : null,
         world?.water ? h('li', null, 'Реальная карта большая: кнопки «−/+» меняют масштаб, «×1» ускоряет время. Береговая линия и молы — по данным OpenStreetMap, глубины не показаны: держитесь фарватеров.') : null,
         traffic ? h('li', null, 'Красный пунктир вокруг судна — уступаете вы; зелёный — уступают вам.') : null),
@@ -327,7 +386,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   }
 
   function doSwitch(): void {
-    if (paused || finished) return;
+    if (paused || finished || motor) return;
     switchSide(s);
     showToast(s.crewSide > 0 ? 'Смена борта: экипаж на правом борту' : 'Смена борта: экипаж на левом борту');
   }
@@ -380,6 +439,12 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     if ((e.target as HTMLElement)?.tagName === 'SELECT') return;
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     if (['ArrowUp', 'ArrowDown', ' ', 'Enter'].includes(k)) e.preventDefault();
+    if (motor && (k === 'ArrowUp' || k === 'ArrowDown' || k === 'n' || k === 'т')) {
+      if (!e.repeat) stepThrottle(k === 'ArrowUp' ? 1 : k === 'ArrowDown' ? -1 : 0);
+      return;
+    }
+    if ((k === 'm' || k === 'ь') && !e.repeat && mission.id === 'free') { setMotor(!motor); return; }
+    if (k === 'Escape' && mapMode) { closeMap(); return; }
     if (k === ' ') togglePause();
     else if (k === 'r' || k === 'к') reset(false);
     else if ((k === 'Enter' || k === 'b' || k === 'и') && !e.repeat) doSwitch();
@@ -411,7 +476,9 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     const push = (held.has('away') ? 1 : 0) - (held.has('toward') ? 1 : 0);
     if (push !== 0) tillerCmd = Math.max(-1, Math.min(1, tillerCmd + push * 2.2 * dt));
     else tillerCmd *= Math.max(0, 1 - 6 * dt);
-    if (simple()) {
+    if (motor && simple()) {
+      c.tiller = tillerCmd; // «нос влево» = tiller to starboard
+    } else if (simple()) {
       // Luff = tiller to leeward.
       const windSide = tel ? (tel.twa >= 0 ? 1 : -1) : 1;
       c.tiller = -windSide * tillerCmd;
@@ -516,6 +583,15 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
           } else if (ev.kind === 'encounter' || ev.kind === 'violation') showToast(ev.textRu);
         }
       }
+      const target = userMarks.find((m) => m.active);
+      if (target && Math.hypot(target.x - s.x, target.y - s.y) < 15) {
+        target.done = true;
+        relabelMarks();
+        const next = userMarks.find((m) => m.active);
+        showToast(next ? `Отметка ${target.label} пройдена. Следующая — ${next.label}.` : `Отметка ${target.label} пройдена — маршрут завершён!`);
+        if (!next) { userMarks = []; }
+        saveMarks();
+      }
       if (s.capsized) capsized();
       else if (!checkGround() && !checkZone() && tel && !finished) {
         const res = runtime.update({ s, t: tel, time, dt, events, marks: runtime.marks, counters, world, traffic, windFrom: windModel.base.from });
@@ -523,10 +599,80 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       }
     }
     if (toastTimer > 0) { toastTimer -= rdt; if (toastTimer <= 0) toast.style.opacity = '0'; }
-    renderer.draw(s, c, tel, lastWind, runtime.marks as Mark[], time, paused ? 0 : dt, zoom, { world, vessels: traffic?.vessels ?? [], night });
+    const marks = userMarks.length ? [...(runtime.marks as Mark[]), ...userMarks] : runtime.marks as Mark[];
+    renderer.draw(s, c, tel, lastWind, marks, time, paused ? 0 : dt, zoom, { world, vessels: traffic?.vessels ?? [], night: night && !mapMode, cam: mapMode ? mapCam : undefined });
     hudTimer -= rdt;
     if (hudTimer <= 0) { hudTimer = 0.12; updateHud(); }
     raf = requestAnimationFrame(frame);
+  }
+
+  function setMotor(on: boolean, quiet = false): void {
+    motor = on && mission.id === 'free';
+    c.sailsDown = motor;
+    if (traffic) traffic.ownType = motor ? 'motor' : 'sail';
+    throttleIdx = 2;
+    c.engine = 0;
+    motorBtn.style.display = mission.id === 'free' ? '' : 'none';
+    motorBtn.textContent = motor ? '⛵ Поставить паруса (M)' : '⚙ Мотор, паруса убрать (M)';
+    thrRow.style.display = motor ? '' : 'none';
+    for (const r of controls.querySelectorAll<HTMLElement>('.r-main, .r-jib')) r.style.display = motor ? 'none' : '';
+    sideBtn.style.display = motor ? 'none' : '';
+    stateBox.style.display = motor ? 'none' : '';
+    awayBtn.update(); towardBtn.update();
+    if (!quiet) showToast(motor ? 'Паруса убраны, мотор заведён — нейтраль. «Вперёд» — дать ход.' : 'Мотор заглушён, паруса поставлены. Настройте шкоты.');
+    if (!motor) { c.main = 0.5; c.jib = 0.5; }
+  }
+
+  function stepThrottle(d: number): void {
+    if (!motor || paused) return;
+    throttleIdx = d === 0 ? 2 : Math.max(0, Math.min(THROTTLE.length - 1, throttleIdx + d));
+    c.engine = THROTTLE[throttleIdx];
+  }
+
+  const marksKey = () => `freeMarks.${area}`;
+  function loadMarks(): void {
+    userMarks = mission.id === 'free' ? load<{ x: number; y: number }[]>(marksKey(), []).map((m) => ({ x: m.x, y: m.y, kind: 'mark' as const })) : [];
+    relabelMarks();
+  }
+  function saveMarks(): void {
+    save(marksKey(), userMarks.filter((m) => !m.done).map((m) => ({ x: Math.round(m.x), y: Math.round(m.y) })));
+  }
+  /** Marks are a route A → B → C; the first one not yet reached is the current target. */
+  function relabelMarks(): void {
+    let first = true;
+    userMarks.forEach((m, i) => {
+      m.label = String.fromCharCode(65 + (i % 26));
+      m.active = !m.done && first;
+      if (m.active) first = false;
+    });
+  }
+
+  function openMap(): void {
+    if (mapMode) return;
+    mapMode = true;
+    paused = true;
+    pauseBtn.textContent = '▶';
+    overlay.style.display = 'none';
+    mapCam.x = s.x; mapCam.y = s.y;
+    toast.style.opacity = '0'; toastTimer = 0;
+    mapZoomBack = zoom;
+    // About 1.5 km across on a real chart, the whole chart otherwise.
+    const r = canvas.getBoundingClientRect();
+    const base = Math.max(9, Math.min(r.width, r.height) / 30);
+    const span = world?.water ? 1500 : world ? Math.max(world.bounds.maxX - world.bounds.minX, world.bounds.maxY - world.bounds.minY) : 600;
+    zoom = Math.max(0.012, Math.min(1, Math.min(r.width, r.height) / span / base));
+    mapHint.textContent = mission.id === 'free'
+      ? '🗺 Карта: тяните — двигать, «−/+» или колесо — масштаб. Нажмите на карту — поставить отметку (цель), на отметку — убрать.'
+      : '🗺 Карта: тяните — двигать, «−/+» или колесо — масштаб.';
+    mapBar.style.display = '';
+  }
+
+  function closeMap(): void {
+    if (!mapMode) return;
+    mapMode = false;
+    zoom = mapZoomBack;
+    mapBar.style.display = 'none';
+    if (!finished && overlay.style.display === 'none') { paused = false; pauseBtn.textContent = '⏸'; }
   }
 
   function updateEngineBox(): void {
@@ -536,11 +682,11 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     engineKey = key;
     clear(engineBox);
     for (const m of near) {
-      engineBox.append(h('button', { class: 'btn engine-btn', title: 'Убрать паруса, завести мотор и идти к причалу', onClick: () => {
+      engineBox.append(h('button', { class: 'btn engine-btn', title: 'Перейти в режим швартовки в этой марине (яхта под мотором)', onClick: () => {
         const [x, y] = toMapCoords(m.data, s.x, s.y);
         sessionStorage.setItem('sailtrainer.handoff', JSON.stringify({ harbour: m.id, x, y, heading: s.heading, windFrom: windModel.base.from, windSpeed: windModel.base.speed }));
         location.hash = '#/sim?m=moor&from=free';
-      } }, `⚙ Мотор → ${m.nameRu}`));
+      } }, `⚓ Швартовка → ${m.nameRu}`));
     }
   }
 
@@ -554,7 +700,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     clear(hudTL);
     hudTL.append(
       h('div', { class: 'val' }, `${kn.toFixed(1)} уз`),
-      h('div', { class: 'pos' }, POINT_OF_SAIL_RU[pos], pos !== 'irons' ? `, ${tack}` : ''),
+      motor ? h('div', { class: 'pos' }, `Мотор: ${THROTTLE_LABEL[throttleIdx].toLowerCase()}`) : h('div', { class: 'pos' }, POINT_OF_SAIL_RU[pos], pos !== 'irons' ? `, ${tack}` : ''),
       h('div', { class: 'small' }, `курс ${Math.round(hdg).toString().padStart(3, '0')}° · к ветру ${Math.round(Math.abs(twa) / DEG)}°`),
       h('div', { class: 'small phone-only' }, `крен ${Math.abs(s.heel / DEG).toFixed(0)}°`),
     );
@@ -569,7 +715,12 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     clear(hudBL);
     hudBL.append(h('div', { class: 'heel-gauge', html: heelSvg(heelDeg) }), h('div', { class: 'small' }, `крен ${Math.abs(heelDeg).toFixed(0)}°`));
     clear(objective);
-    objective.append(runtime.objective);
+    const target = userMarks.find((m) => m.active);
+    if (target) {
+      const d = Math.hypot(target.x - s.x, target.y - s.y);
+      const brg = ((Math.atan2(target.x - s.x, target.y - s.y) / DEG) + 360) % 360;
+      objective.append(`Отметка ${target.label}: ${d < 1000 ? `${Math.round(d)} м` : `${(d / 1000).toFixed(1)} км`} · пеленг ${String(Math.round(brg)).padStart(3, '0')}°`);
+    } else objective.append(runtime.objective);
     if (runtime.progress !== undefined) objective.append(h('div', { class: 'progress' }, h('div', { style: { width: `${runtime.progress * 100}%` } })));
     objective.style.display = runtime.objective ? '' : 'none';
 
@@ -583,11 +734,12 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
           : `Вам уступает ${TRAFFIC_RU[enc.type]} — держите курс и скорость`;
         hintBox.append(h('div', { class: `hint ${enc.encounter.giveWay === 'own' ? 'danger' : 'ok'}` }, encounterText));
       }
-      for (const hn of hints(s, tel, world).slice(0, encounterText ? 2 : 3)) hintBox.append(h('div', { class: `hint ${hn.level}` }, hn.ru));
+      for (const hn of hints(s, tel, world, motor).slice(0, encounterText ? 2 : 3)) hintBox.append(h('div', { class: `hint ${hn.level}` }, hn.ru));
     }
 
     // Controls panel
     const tillerDeg = Math.round(Math.abs(tillerCmd) * 35);
+    thrInfo.textContent = THROTTLE_LABEL[throttleIdx];
     tillerInfo.textContent = tillerDeg < 2 ? 'прямо' : simple()
       ? `${tillerCmd > 0 ? 'приводимся' : 'уваливаемся'} ${tillerDeg}°`
       : `${tillerCmd > 0 ? 'от себя' : 'к себе'} ${tillerDeg}°`;

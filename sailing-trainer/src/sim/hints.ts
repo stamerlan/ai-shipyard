@@ -16,7 +16,7 @@ export const SAIL_STATE_RU: Record<SailState, string> = {
 };
 
 /** Coaching hints for the current situation, most important first. */
-export function hints(s: BoatState, t: Telemetry, world: World | null): Hint[] {
+export function hints(s: BoatState, t: Telemetry, world: World | null, motor = false): Hint[] {
   const out: Hint[] = [];
   const pos = pointOfSail(t.twa);
   const heelLee = -Math.sign(t.awa || 1) * s.heel; // heel to leeward is positive
@@ -27,6 +27,10 @@ export function hints(s: BoatState, t: Telemetry, world: World | null): Hint[] {
       const hit = isBlocked(world, s.x + sh * d, s.y + ch * d);
       if (hit && hit !== 'pontoon') { out.push({ level: 'danger', ru: `${hit === 'shoal' ? 'Мель' : 'Берег'} прямо по курсу (${d} м)! Меняйте курс.` }); break; }
     }
+  }
+  if (motor) {
+    if (s.u < -0.15) out.push({ level: 'info', ru: 'Задний ход: руль действует наоборот.' });
+    return out;
   }
   if (t.crewLeeward) out.push({ level: 'danger', ru: 'Экипаж на подветренном борту! Команда «Смена борта».' });
   if (heelLee > 30 * DEG) out.push({ level: 'danger', ru: 'Опасный крен! Потравите грота-шкот.' });

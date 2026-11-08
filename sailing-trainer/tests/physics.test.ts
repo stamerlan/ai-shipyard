@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { initialState, step, switchSide, DEG, pointOfSail, tackOf, apparentWind, type Controls } from '../src/sim/physics';
+import { initialState, step, switchSide, DEG, pointOfSail, tackOf, apparentWind, wrap, type Controls } from '../src/sim/physics';
 import { steadySpeed } from './trim';
 import { bestSpeed } from './polar';
 
@@ -129,5 +129,25 @@ describe('physics', () => {
       return -s.heading; // bearing away = turning to port = heading decreasing
     };
     expect(turn(true)).toBeGreaterThan(turn(false) + 5 * DEG);
+  });
+});
+
+describe('outboard with the sails down', () => {
+  const run = (c: Partial<Controls>, wind: number, secs = 60, heading = 90) => {
+    const s = initialState(heading * DEG, 0, 0, 0, 0);
+    const cc: Controls = { tiller: 0, main: 0.6, jib: 0.6, board: 1, sailsDown: true, ...c };
+    for (let t = 0; t < secs; t += 1 / 60) step(s, cc, { from: 0, speed: wind }, 1 / 60);
+    return s;
+  };
+  it('lowered sails give no drive; the engine pushes the boat at 4–6 kn', () => {
+    // Only drift under bare poles (the mast and hull windage), well below sailing speed.
+    expect(Math.abs(run({ engine: 0 }, 6).u)).toBeLessThan(1);
+    const kn = run({ engine: 1 }, 0).u * 1.944;
+    expect(kn).toBeGreaterThan(4);
+    expect(kn).toBeLessThan(6);
+  });
+  it('the outboard turns the boat almost on the spot', () => {
+    const s = run({ engine: 0.5, tiller: 1 }, 2, 5, 0);
+    expect(Math.abs(wrap(s.heading))).toBeGreaterThan(120 * DEG);
   });
 });

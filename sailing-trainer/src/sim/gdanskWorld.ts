@@ -91,8 +91,7 @@ export function createGdanskWorld(): World {
 
 /** Harbours of the motor (mooring) mode that lie on this chart. */
 export const MOTOR_HARBOURS: { id: string; nameRu: string; data: MapData; box: [number, number, number, number] }[] = [
-  { id: 'gdansk_old', nameRu: 'Старый город (Мотлава)', data: GDANSK_MARINA, box: [-380, -380, -80, 120] },
-  { id: 'gdansk', nameRu: 'Марина Гданьск (Шафарня)', data: GDANSK_MARINA, box: [-120, -700, 130, 200] },
+  { id: 'gdansk', nameRu: 'Марина Гданьск (Шафарня)', data: GDANSK_MARINA, box: [-400, -800, 130, 300] },
   { id: 'ncz', nameRu: 'NCŻ / Гурки-Заходние', data: NCZ, box: [6950, 1050, 8300, 2500] },
 ];
 

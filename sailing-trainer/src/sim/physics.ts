@@ -17,7 +17,14 @@ export interface Controls {
   hike?: number;
   /** Centreboard 0..1 (1 = fully down). */
   board: number;
+  /** Sails lowered (going under the outboard). */
+  sailsDown?: boolean;
+  /** Outboard throttle −1..1 (negative = astern). */
+  engine?: number;
 }
+
+/** Outboard thrust at full throttle, N (about 5 kn flat out). */
+export const ENGINE_THRUST = 95;
 
 export interface Wind {
   /** Direction the wind blows FROM (compass, rad). */
@@ -273,7 +280,13 @@ export function step(s: BoatState, c: Controls, w: Wind, dt: number): { t: Telem
 
   // Windage of hull, crew and rig acts along the apparent wind flow.
   const windage = 0.5 * BOAT.rho * aws * aws * 0.6;
-  const Fx = mainF.drive + jibF.drive - resist - windage * Math.cos(awa);
+  if (c.sailsDown) {
+    // Lowered sails: no drive, no side force (only the hull and rig windage remain).
+    for (const f of [mainF, jibF]) { f.drive = 0; f.side = 0; }
+  }
+  const eng = c.sailsDown ? clamp(c.engine ?? 0, -1, 1) : 0;
+  const thrust = eng * ENGINE_THRUST * (eng < 0 ? 0.55 : 1);
+  const Fx = mainF.drive + jibF.drive + thrust - resist - windage * Math.cos(awa);
   const Fy = mainF.side + jibF.side - lateral - windage * Math.sin(awa);
 
   // Boat-frame dynamics with rotation coupling.
@@ -294,7 +307,8 @@ export function step(s: BoatState, c: Controls, w: Wind, dt: number): { t: Telem
   s.heel += (heelTarget - s.heel) * 2.5 * dt;
 
   // --- Yaw ---
-  const steer = -0.4 * c.tiller * s.u;
+  // The outboard turns with the tiller: its thrust steers even without way on.
+  const steer = -0.4 * c.tiller * s.u - 0.012 * c.tiller * thrust;
   // A heeled boat turns away from its low side (weather helm when heeled to leeward).
   const excessHeel = Math.sign(s.heel) * Math.max(0, Math.abs(s.heel) - 8 * DEG);
   const helm = -0.6 * excessHeel * Math.min(1, absU / 1.2);

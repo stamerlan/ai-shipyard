@@ -363,3 +363,16 @@ kbd { background: #eef2f5; border: 1px solid #ccd5dc; border-radius: 4px; paddin
   .engine-box { flex-wrap: nowrap; padding: 0; }
   .engine-btn { padding: 6px 4px; font-size: 12px; line-height: 1.2; }
 }
+.mode-row { display: flex; }
+.mode-row .btn { flex: 1 1 auto; }
+.mode-row:has(.btn[style*="display: none"]) { display: none; }
+.preview-bar { flex-wrap: wrap; justify-content: flex-end; }
+.preview-bar span { flex: 1 1 260px; }
+@media (max-width: 600px) {
+  .preview-bar { gap: 6px; padding: 6px 8px; }
+  .preview-bar span { flex-basis: 100%; font-size: 12px; }
+  .motor-btn { padding: 7px 6px; font-size: 13px; }
+}
+@media (max-width: 600px) {
+  .preview-bar { left: 8px; right: 8px; transform: none; max-width: none; }
+}

@@ -311,16 +311,6 @@ export const HARBOURS: { id: string; nameRu: string; make: () => HarbourLayout }
     }),
   },
   {
-    id: 'gdansk_old', nameRu: 'Гданьск — Старый город, Мотлава (лагом)', make: () => realHarbour({
-      id: 'gdansk_old', data: GDANSK_MARINA, mooring: 'alongside', current: { x: 0.03, y: 0.1 },
-      quays: [[-345, -250, -110, 45]], area: [-345, -335, -110, 45],
-      nameRu: 'Гданьск — Старый город (Мотлава у Зелёного моста)',
-      placeRu: 'Реальная акватория: Мотлава в самом центре — набережная Długie Pobrzeże (Старый город) и Остров Спихлежей, на юге — Зелёный мост и Зелёные ворота; за мостом на острове улица Chmielna (паб Whiskey in the Jar). Река узкая, ходят прогулочные суда, слабое течение на север. Места у стенки и пирсов — учебные.',
-      mooringRu: 'Лагом к стенке. Идите вдоль набережной в 3–4 м от стоящих яхт; когда корма пройдёт соседа — к стенке под 25–30°. У места: нейтраль, румпелем подведите корму, ход гасите малым задним. Подходите против течения (носом на юг).',
-      labels: [{ x: -330, y: -110, text: 'Długie Pobrzeże' }, { x: -170, y: -190, text: 'Остров Спихлежей' }, { x: -205, y: -300, text: 'Chmielna · Whiskey in the Jar' }, { x: -335, y: -285, text: 'Зелёные ворота' }],
-    }),
-  },
-  {
     id: 'ncz', nameRu: 'Гурки-Заходние — NCŻ (муринг)', make: () => realHarbour({
       id: 'ncz', data: NCZ, mooring: 'bowto', insideMarinas: true, buoyRu: 'муринг',
       nameRu: 'Гурки-Заходние — Narodowe Centrum Żeglarstwa',
