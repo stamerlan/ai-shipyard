@@ -242,7 +242,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     safeTrail = [{ x: s.x, y: s.y, heading: s.heading }];
     renderer.reset();
     renderer.showNoGo = prefs.showNoGo;
-    zoom = night ? 0.3 : world?.water ? 0.5 : area === 'bay' ? 0.4 : world ? 0.6 : traffic ? 0.7 : 1;
+    zoom = night ? 0.3 : world?.water ? 0.5 : area === 'bay' ? 0.4 : world ? 0.6 : traffic ? 0.45 : 1;
     if (Number.isFinite(renderer.fogRange)) zoom = Math.max(zoom, 0.6);
     // Let the sails settle into position before the start.
     for (let i = 0; i < 60; i++) {
@@ -281,7 +281,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
         mission.id === 'free' && area === 'gdansk' ? h('li', null, 'У Марины Гданьск (Шафарня) и NCŻ появится кнопка «⚓ Швартовка» — переход к швартовке на своё место.') : null,
         area === 'bay' ? h('li', null, 'Учебная карта выдуманная (как учебные карты RYA) — для тренировки, не для навигации.') : null,
         world?.water ? h('li', null, 'Реальная карта большая: кнопки «−/+» меняют масштаб, «×1» ускоряет время. Береговая линия и молы — по данным OpenStreetMap, глубины не показаны: держитесь фарватеров.') : null,
-        traffic ? h('li', null, 'Красный пунктир вокруг судна — уступаете вы; зелёный — уступают вам.') : null),
+        traffic ? h('li', null, 'Если курсы пересекаются, они рисуются линиями до точки встречи: красные — уступаете вы, зелёные — уступают вам (держите курс и скорость).') : null),
       h('p', { class: 'keys' }, KEYS_HELP.map(([k, t]) => h('span', { style: { marginRight: '10px', display: 'inline-block' } }, h('kbd', null, k), ' ', t))),
       h('button', { class: 'btn', onClick: () => { overlay.style.display = 'none'; paused = false; pauseBtn.textContent = '⏸'; } }, 'Старт'),
     ));
@@ -580,7 +580,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
           if (ev.kind === 'collision') {
             if (mission.id === 'free') freeMishap('Столкновение!', `${ev.textRu} Уступающее судно должно менять курс заранее и явно.`, () => { s.u = 0; s.v = 0; });
             else if (!finished && mission.id !== 'traffic') finish(false, `${ev.textRu} Крупное судно не может быстро отвернуть или остановиться — уходите с его пути заранее.`);
-          } else if (ev.kind === 'encounter' || ev.kind === 'violation') showToast(ev.textRu);
+          } else if (ev.kind === 'violation') showToast(ev.textRu);
+          // Encounters are shown on the chart: the courses are drawn red (you give way) or green.
         }
       }
       const target = userMarks.find((m) => m.active);
@@ -730,8 +731,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       encounterText = '';
       if (enc?.encounter) {
         encounterText = enc.encounter.giveWay === 'own'
-          ? `⚠ Уступите дорогу: ${TRAFFIC_RU[enc.type]} (${enc.encounter.ruleRu})`
-          : `Вам уступает ${TRAFFIC_RU[enc.type]} — держите курс и скорость`;
+          ? `⚠ Уступаете вы: ${TRAFFIC_RU[enc.type]}`
+          : `Уступают вам — держите курс и скорость`;
         hintBox.append(h('div', { class: `hint ${enc.encounter.giveWay === 'own' ? 'danger' : 'ok'}` }, encounterText));
       }
       for (const hn of hints(s, tel, world, motor).slice(0, encounterText ? 2 : 3)) hintBox.append(h('div', { class: `hint ${hn.level}` }, hn.ru));

@@ -89,6 +89,7 @@ export class Renderer {
     this.drawWake(v);
     if (this.showNoGo && !scene.night && !c.sailsDown) this.drawNoGo(v, s, wind);
     for (const m of marks) this.drawMark(v, m, time);
+    this.drawTracks(v, scene.vessels, s);
     for (const vs of scene.vessels) this.drawVessel(v, vs, wind.from, time);
     if (scene.night) {
       ctx.fillStyle = 'rgba(4,10,22,0.86)';
@@ -116,7 +117,8 @@ export class Renderer {
     }
     for (const m of marks) if (m.active) this.drawOffscreen(v, m, s);
     for (const vs of scene.vessels) {
-      if (vs.encounter) this.drawOffscreen(v, { x: vs.x, y: vs.y, kind: 'mark' }, s, vs.encounter.giveWay === 'own' ? 'rgba(255,70,70,0.95)' : 'rgba(80,230,120,0.95)');
+      const who = vs.encounter?.giveWay ?? vs.predicted;
+      if (who) this.drawOffscreen(v, { x: vs.x, y: vs.y, kind: 'mark' }, s, who === 'own' ? 'rgba(255,70,70,0.95)' : 'rgba(80,230,120,0.95)');
     }
     if (scene.world) this.drawMinimap(v, scene, s, marks);
     if (scene.world?.attribution) {
@@ -125,6 +127,48 @@ export class Renderer {
       ctx.textAlign = 'center';
       ctx.fillText(scene.world.attribution, w / 2, h - 4);
       ctx.textAlign = 'left';
+    }
+  }
+
+  /** Courses that meet: both tracks to the meeting point, red if you must give way, green if they must. */
+  private drawTracks(v: View, vessels: AIVessel[], s: BoatState): void {
+    const { ctx } = v;
+    const os = Math.max(0.5, Math.hypot(s.u, s.v));
+    const ox = Math.sin(s.heading) * os, oy = Math.cos(s.heading) * os;
+    for (const vs of vessels) {
+      let color: string | null = null;
+      const who = vs.encounter?.giveWay ?? vs.predicted;
+      if (who) color = who === 'own' ? '#ff4040' : '#3fe07a';
+      // A ship in a fairway: red when you are near its track ahead (keep out of its way).
+      if (!color && vs.lane) {
+        const dx = s.x - vs.x, dy = s.y - vs.y;
+        const along = dx * Math.sin(vs.heading) + dy * Math.cos(vs.heading);
+        const across = dx * Math.cos(vs.heading) - dy * Math.sin(vs.heading);
+        if (along > 0 && along < 450 && Math.abs(across) < vs.halfB + 60) color = '#ff4040';
+      }
+      if (!color) continue;
+      // Time of closest approach decides where both tracks end.
+      const vx = Math.sin(vs.heading) * vs.speed, vy = Math.cos(vs.heading) * vs.speed;
+      const rx = vs.x - s.x, ry = vs.y - s.y, rvx = vx - ox, rvy = vy - oy;
+      const tc = Math.max(8, Math.min(120, -(rx * rvx + ry * rvy) / (rvx * rvx + rvy * rvy || 1e-6)));
+      const meet = (x: number, y: number, ux: number, uy: number): [number, number] => [x + ux * tc, y + uy * tc];
+      const [ax, ay] = meet(vs.x, vs.y, vx, vy), [bx, by] = meet(s.x, s.y, ox, oy);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.9;
+      ctx.lineWidth = 3;
+      ctx.setLineDash([10, 6]);
+      for (const [x0, y0, x1, y1] of [[vs.x, vs.y, ax, ay], [s.x, s.y, bx, by]]) {
+        const [sx0, sy0] = this.toScreen(v, x0, y0), [sx1, sy1] = this.toScreen(v, x1, y1);
+        ctx.beginPath(); ctx.moveTo(sx0, sy0); ctx.lineTo(sx1, sy1); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      // Meeting point: a ring between the two predicted positions.
+      const [mx, my] = this.toScreen(v, (ax + bx) / 2, (ay + by) / 2);
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(mx, my, 9, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(mx - 6, my - 6); ctx.lineTo(mx + 6, my + 6); ctx.moveTo(mx + 6, my - 6); ctx.lineTo(mx - 6, my + 6); ctx.stroke();
+      ctx.restore();
     }
   }
 

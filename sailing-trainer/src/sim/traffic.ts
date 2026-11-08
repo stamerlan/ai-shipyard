@@ -20,6 +20,8 @@ export interface AIVessel {
   halfL: number;
   halfB: number;
   encounter: Encounter | null;
+  /** Early warning while the courses converge: who will have to give way. */
+  predicted?: 'own' | 'other' | null;
   /** Seconds left of an avoiding turn. */
   avoiding: number;
   avoidHeading: number;
@@ -124,7 +126,7 @@ export class Traffic {
     if (inPath && !L.warned) {
       L.warned = true;
       this.violations++;
-      events.push({ kind: 'violation', vessel: v, textRu: 'Судно в фарватере даёт пять коротких гудков: вы мешаете его проходу! Маломерное и парусное судно не должно затруднять движение судна, которое может идти только по фарватеру (МППСС, правило 9). Уходите с его курса.' });
+      events.push({ kind: 'violation', vessel: v, textRu: '📢 Пять коротких: вы мешаете судну в фарватере (правило 9)' });
     }
     if (L.warned && (along < 0 || Math.abs(across) > v.halfB + 60)) L.warned = false;
   }
@@ -204,6 +206,10 @@ export class Traffic {
       const tcpa = -(dx * rvx + dy * rvy) / rv2;
       const cpa = Math.hypot(dx + rvx * tcpa, dy + rvy * tcpa);
       const safe = v.type === 'ship' ? 35 : 16;
+      // Show the converging courses early (well before anyone has to act).
+      if (!v.encounter && tcpa > 0 && tcpa < 75 && cpa < safe * 1.6 && dist < 350) {
+        v.predicted = judge({ kind: 'live', own, other: { x: v.x, y: v.y, heading: v.heading, type: v.type, speed: v.speed }, windFrom, context: 'colreg' }).giveWay;
+      } else if (!v.encounter) v.predicted = null;
 
       if (!v.encounter && tcpa > 0 && tcpa < 40 && cpa < safe && dist < 160) {
         const verdict = judge({ kind: 'live', own, other: { x: v.x, y: v.y, heading: v.heading, type: v.type, speed: v.speed }, windFrom, context: 'colreg' });
@@ -224,7 +230,7 @@ export class Traffic {
         if (v.encounter.giveWay === 'own' && !v.encounter.violation && dist < close + v.halfL * 0.3) {
           v.encounter.violation = true;
           this.violations++;
-          events.push({ kind: 'violation', vessel: v, textRu: `Опасное сближение: уступить должны были вы (${v.encounter.ruleRu}).` });
+          events.push({ kind: 'violation', vessel: v, textRu: `⚠ Опасное сближение — уступить должны были вы` });
         }
         if (tcpa < -4 || dist > 120) {
           events.push({ kind: 'passed', vessel: v, textRu: v.encounter.violation ? 'Разошлись, но слишком близко.' : 'Разошлись безопасно.' });
