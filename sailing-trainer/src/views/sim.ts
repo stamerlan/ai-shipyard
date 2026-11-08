@@ -9,6 +9,7 @@ import { MISSIONS, MISSION_BY_ID, type MissionDef, type MissionRuntime } from '.
 import { hints, SAIL_STATE_RU } from '../sim/hints';
 import { createWorld, isBlocked, type World } from '../sim/world';
 import { Traffic, TRAFFIC_RU } from '../sim/traffic';
+import { motorSimView } from './simMotor';
 
 interface SimPrefs {
   linkJib: boolean;
@@ -27,6 +28,7 @@ const KEYS_HELP: [string, string][] = [
 type Hold = 'away' | 'toward' | 'mainIn' | 'mainOut' | 'jibIn' | 'jibOut';
 
 export function simView(root: HTMLElement, params: URLSearchParams): () => void {
+  if (MISSION_BY_ID[params.get('m') ?? '']?.motor) return motorSimView(root, params);
   const prefs: SimPrefs = load('simPrefs', { linkJib: true, showNoGo: true, freeBft: 3, freeGusts: true, freeWorld: true, freeTraffic: 1, freeNight: false });
   const savePrefs = () => save('simPrefs', prefs);
   const simple = () => settings.steerMode === 'bow';
@@ -65,7 +67,10 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
 
   const missionSel = h('select', { 'aria-label': 'Задание' }, MISSIONS.map((m) => h('option', { value: m.id }, m.ru)));
   missionSel.value = mission.id;
-  missionSel.addEventListener('change', () => { mission = MISSION_BY_ID[missionSel.value]; reset(true); });
+  missionSel.addEventListener('change', () => {
+    if (MISSION_BY_ID[missionSel.value].motor) { location.hash = `#/sim?m=${missionSel.value}`; return; }
+    mission = MISSION_BY_ID[missionSel.value]; reset(true);
+  });
   const pauseBtn = h('button', { class: 'btn secondary small', onClick: () => togglePause() }, '⏸');
   const bar = h('div', { class: 'sim-bar' },
     missionSel,
@@ -197,7 +202,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       h('p', null, text),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onClick: () => reset(false) }, 'Ещё раз'),
-        won ? h('button', { class: 'btn secondary', onClick: () => { mission = nextM; missionSel.value = nextM.id; reset(true); } }, `Дальше: ${nextM.ru}`) : null,
+        won ? h('button', { class: 'btn secondary', onClick: () => { if (nextM.motor) { location.hash = `#/sim?m=${nextM.id}`; return; } mission = nextM; missionSel.value = nextM.id; reset(true); } }, `Дальше: ${nextM.ru}`) : null,
         h('a', { class: 'btn secondary', href: '#/maneuvers' }, 'Повторить манёвры'),
       ),
     ));

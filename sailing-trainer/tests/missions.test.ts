@@ -87,21 +87,6 @@ describe('missions are completable', () => {
     };
   };
 
-  it('leave the marina through the fairway', () => {
-    const { res } = run('marina_out', follow([[-330, 0], [-290, 0], [-100, 0], [0, 0]]));
-    expect(res?.won, res?.textRu).toBe(true);
-  });
-
-  it('enter the marina and stop at the berth', () => {
-    const go = follow([[-100, 0], [-290, 0], [-340, 14]], 4);
-    let stopping = false;
-    const { res } = run('marina_in', (s) => {
-      if (!stopping && Math.hypot(-340 - s.x, 14 - s.y) < 4) stopping = true;
-      return stopping ? { heading: Math.atan2(-350 - s.x, 32 - s.y) } : go(s);
-    });
-    expect(res?.won, res?.textRu).toBe(true);
-  });
-
   it('cutting through the cardinal-marked shoal runs aground; going round works', () => {
     const straight = run('cardinals', () => ({ heading: Math.PI }));
     expect(straight.res?.textRu).toMatch(/aground/);
