@@ -49,6 +49,13 @@ export interface World {
   gates: Gate[];
   berth: { x: number; y: number };
   bounds: { minX: number; maxX: number; minY: number; maxY: number };
+  /** Real maps: navigable water rings (even–odd); everything outside is land. */
+  water?: Pt[][];
+  waterIndex?: WaterIndex;
+  bridges?: Pt[][];
+  marinaOutlines?: Pt[][];
+  labels?: { x: number; y: number; text: string }[];
+  attribution?: string;
 }
 
 const GATE_XS = [-250, -200, -150, -100];
@@ -105,6 +112,7 @@ export function pointInPoly(x: number, y: number, poly: Pt[]): boolean {
 
 /** Is this point on land, on a shoal or on a pontoon? */
 export function isBlocked(w: World, x: number, y: number): 'land' | 'shoal' | 'pontoon' | null {
+  if (w.waterIndex && !w.waterIndex.contains(x, y)) return 'land';
   for (const p of w.pontoons) if (x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h) return 'pontoon';
   for (const s of w.shoals) if (Math.hypot(x - s.x, y - s.y) < s.r) return 'shoal';
   for (const poly of w.land) if (pointInPoly(x, y, poly)) return 'land';

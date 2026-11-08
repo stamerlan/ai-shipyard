@@ -65,3 +65,21 @@ describe('traffic', () => {
     expect(collisionsWhenStandOn).toBe(0);
   });
 });
+
+import { createGdanskWorld, GDANSK_STARTS, GULF_ANCHOR } from '../src/sim/gdanskWorld';
+
+describe('Gdańsk chart for free sailing', () => {
+  const g = createGdanskWorld();
+  it('all start positions and the gulf anchor are in open water', () => {
+    for (const [id, , x, y] of GDANSK_STARTS) expect(isBlocked(g, x, y), id).toBeNull();
+    // Wind-relative exercises are placed around the anchor: keep ~600 m of water around it.
+    for (let a = 0; a < 360; a += 15) {
+      const r = 600;
+      expect(isBlocked(g, GULF_ANCHOR.x + r * Math.sin(a * DEG), GULF_ANCHOR.y + r * Math.cos(a * DEG)), `${a}`).toBeNull();
+    }
+  });
+  it('land is land and the sea is sea', () => {
+    expect(isBlocked(g, 2000, 3000)).toBe('land'); // city between the rivers
+    expect(isBlocked(g, 3000, 8500)).toBeNull(); // Gulf of Gdańsk
+  });
+});

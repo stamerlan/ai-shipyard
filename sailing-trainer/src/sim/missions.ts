@@ -13,6 +13,8 @@ export interface MissionCtx {
   counters: { tacks: number; gybes: number; crashGybes: number };
   world: World | null;
   traffic: Traffic | null;
+  /** Mean wind direction ("from"), radians. */
+  windFrom: number;
 }
 
 export interface MissionResult {
@@ -45,6 +47,12 @@ export interface MissionDef {
   traffic?: number;
   /** Harbour manoeuvres under engine (separate simulator mode). */
   motor?: boolean;
+  /** Geometry is drawn for wind from the north and is rotated to the chosen wind direction. */
+  windRelative?: boolean;
+  /** Task on the real Gdańsk chart (positions are fixed on the map). */
+  realMap?: boolean;
+  /** Default wind direction, degrees ("from"); north if omitted. */
+  windDeg?: number;
   create(): MissionRuntime;
 }
 
@@ -93,7 +101,7 @@ export const MISSIONS: MissionDef[] = [
     create: () => ({ marks: [], objective: 'Свободное плавание', update: () => null }),
   },
   {
-    id: 'points', ru: 'Курсы относительно ветра', en: 'Points of sail', beaufort: 3, gusts: 0.15, shifts: 0,
+    id: 'points', windRelative: true, ru: 'Курсы относительно ветра', en: 'Points of sail', beaufort: 3, gusts: 0.15, shifts: 0,
     descRu: 'Ложитесь на указанный курс и галс, настройте паруса (без заполаскивания) и удерживайте 4 секунды.',
     start: { x: 0, y: 0, heading: 90 * DEG, speed: 1.5, main: 0.4 },
     create() {
@@ -128,13 +136,13 @@ export const MISSIONS: MissionDef[] = [
     },
   },
   {
-    id: 'beat', ru: 'Лавировка к наветренному знаку', en: 'Beating to windward', beaufort: 3, gusts: 0.2, shifts: 6 * DEG,
+    id: 'beat', windRelative: true, ru: 'Лавировка к наветренному знаку', en: 'Beating to windward', beaufort: 3, gusts: 0.2, shifts: 6 * DEG,
     descRu: 'Знак находится прямо против ветра в 200 м. Идите бейдевиндом и меняйте галсы поворотом оверштаг.',
     start: { x: 0, y: 0, heading: 50 * DEG, speed: 1.5, main: 0.9 },
     create: () => courseRuntime([{ x: 0, y: 200, kind: 'mark', label: '1' }], 7, 'Дойдите до знака против ветра'),
   },
   {
-    id: 'slalom', ru: 'Слалом по ветру (повороты фордевинд)', en: 'Downwind slalom (gybing)', beaufort: 3, gusts: 0.2, shifts: 0,
+    id: 'slalom', windRelative: true, ru: 'Слалом по ветру (повороты фордевинд)', en: 'Downwind slalom (gybing)', beaufort: 3, gusts: 0.2, shifts: 0,
     descRu: 'Пройдите знаки по ветру по порядку. Каждый знак требует поворота фордевинд — подбирайте грота-шкот перед поворотом!',
     start: { x: 0, y: 0, heading: 160 * DEG, speed: 2, main: 0.1 },
     create: () => courseRuntime([
@@ -145,7 +153,7 @@ export const MISSIONS: MissionDef[] = [
     ], 10, 'Пройдите знаки по ветру'),
   },
   {
-    id: 'buoy', ru: 'Подход к бую', en: 'Picking up a buoy', beaufort: 3, gusts: 0.1, shifts: 0,
+    id: 'buoy', windRelative: true, ru: 'Подход к бую', en: 'Picking up a buoy', beaufort: 3, gusts: 0.1, shifts: 0,
     descRu: 'Остановитесь носом у буя: расстояние от носа меньше 3 м, скорость меньше 1 узла. Подходите против ветра и гасите ход в левентике.',
     start: { x: -60, y: -10, heading: 90 * DEG, speed: 2, main: 0.5 },
     create() {
@@ -166,7 +174,7 @@ export const MISSIONS: MissionDef[] = [
     },
   },
   {
-    id: 'mob', ru: 'Человек за бортом', en: 'Man overboard', beaufort: 3, gusts: 0.15, shifts: 0,
+    id: 'mob', windRelative: true, ru: 'Человек за бортом', en: 'Man overboard', beaufort: 3, gusts: 0.15, shifts: 0,
     descRu: 'Через несколько секунд человек упадёт за борт. Вернитесь и остановитесь рядом с ним (меньше 3 м, скорость меньше 1 узла). Не наезжайте на человека!',
     start: { x: 0, y: 0, heading: 90 * DEG, speed: 2, main: 0.5 },
     create() {
@@ -186,7 +194,8 @@ export const MISSIONS: MissionDef[] = [
             return null;
           }
           // The person drifts slowly downwind.
-          p.y -= 0.12 * ctx.dt;
+          p.x -= Math.sin(ctx.windFrom) * 0.12 * ctx.dt;
+          p.y -= Math.cos(ctx.windFrom) * 0.12 * ctx.dt;
           const d = dist(ctx.s.x, ctx.s.y, p.x, p.y);
           const el = ctx.time - fallTime;
           rt.objective = `«Человек за бортом!» · ${Math.round(d)} м · ${fmtTime(el)}`;
@@ -200,7 +209,7 @@ export const MISSIONS: MissionDef[] = [
     },
   },
   {
-    id: 'triangle', ru: 'Треугольная дистанция', en: 'Triangle course', beaufort: 3, gusts: 0.25, shifts: 6 * DEG,
+    id: 'triangle', windRelative: true, ru: 'Треугольная дистанция', en: 'Triangle course', beaufort: 3, gusts: 0.25, shifts: 6 * DEG,
     descRu: 'Классическая гоночная дистанция: наветренный знак (лавировка), знак на галфвинде, подветренный знак.',
     start: { x: 10, y: -10, heading: 45 * DEG, speed: 1.5, main: 0.9 },
     create: () => courseRuntime([
@@ -210,7 +219,7 @@ export const MISSIONS: MissionDef[] = [
     ], 9, 'Обойдите знаки 1 → 2 → 3'),
   },
   {
-    id: 'gusty', ru: 'Свежий порывистый ветер', en: 'Fresh, gusty wind', beaufort: 5, gusts: 0.6, shifts: 5 * DEG,
+    id: 'gusty', windRelative: true, ru: 'Свежий порывистый ветер', en: 'Fresh, gusty wind', beaufort: 5, gusts: 0.6, shifts: 5 * DEG,
     descRu: '5 баллов с порывами. Пройдите 250 м галфвиндом и не опрокиньтесь: в порывах травите грот и откренивайтесь.',
     start: { x: 0, y: 0, heading: 90 * DEG, speed: 2, main: 0.5 },
     create: () => courseRuntime([{ x: 250, y: 0, kind: 'finish', label: 'Финиш' }], 10, 'Дойдите до финиша'),
@@ -222,7 +231,7 @@ export const MISSIONS: MissionDef[] = [
     create: () => courseRuntime([{ x: 80, y: 20, kind: 'finish', label: 'Финиш' }], 10, 'Дойдите до финиша, обойдя мель'),
   },
   {
-    id: 'traffic', ru: 'Расхождение с судами', en: 'Collision avoidance', beaufort: 3, gusts: 0.1, shifts: 0, traffic: 3,
+    id: 'traffic', windRelative: true, ru: 'Расхождение с судами', en: 'Collision avoidance', beaufort: 3, gusts: 0.1, shifts: 0, traffic: 3,
     descRu: 'Пройдите 450 м галфвиндом среди других судов. Красный пунктир вокруг судна — уступить должны вы: меняйте курс заранее и явно, лучше за корму другого судна. Зелёный — уступают вам: держите курс и скорость.',
     start: { x: 0, y: 0, heading: 90 * DEG, speed: 2, main: 0.5 },
     create() {
@@ -241,6 +250,28 @@ export const MISSIONS: MissionDef[] = [
       };
       return rt;
     },
+  },
+  {
+    id: 'gd_entry', ru: 'Гданьск: вход в порт с моря', en: 'Gdańsk: entering port from sea', beaufort: 3, gusts: 0.2, shifts: 5 * DEG,
+    realMap: true, windDeg: 270,
+    descRu: 'Реальная карта. Из Гданьского залива обогните голову восточного мола, войдите в порт между головами молов (по системе МАМС-А при входе с моря красные латеральные знаки оставляют слева, зелёные — справа) и дойдите по Мёртвой Висле до Вестерплатте. Не срезайте мол!',
+    start: { x: 350, y: 8050, heading: 200 * DEG, speed: 2, main: 0.5 },
+    create: () => courseRuntime([
+      { x: -250, y: 7450, kind: 'mark', label: 'Голова мола' },
+      { x: 80, y: 6600, kind: 'mark', label: 'Вход' },
+      { x: 600, y: 6040, kind: 'finish', label: 'Вестерплатте' },
+    ], 45, 'Обогните голову мола и войдите в порт'),
+  },
+  {
+    id: 'gd_ncz', ru: 'Гданьск: заход в устье Śmiała Wisła (NCŻ)', en: 'Gdańsk: Śmiała Wisła mouth', beaufort: 3, gusts: 0.2, shifts: 5 * DEG,
+    realMap: true, windDeg: 270,
+    descRu: 'Реальная карта. Устье Śmiała Wisła прикрыто с востока длинным молом: подходите с северо-запада, оставьте голову мола слева, пройдите между молом и западным берегом и дойдите до акватории яхтенных гаваней Гурки-Заходние — здесь Национальный центр парусного спорта (NCŻ) и яхт-клубы. Вход узкий: заранее выберите галс, чтобы не лавировать у мола.',
+    start: { x: 7300, y: 3350, heading: 155 * DEG, speed: 2, main: 0.5 },
+    create: () => courseRuntime([
+      { x: 7740, y: 2380, kind: 'mark', label: 'Вход' },
+      { x: 7860, y: 2150, kind: 'mark', label: 'Устье' },
+      { x: 7830, y: 1830, kind: 'finish', label: 'NCŻ' },
+    ], 40, 'Войдите в устье, оставив мол слева'),
   },
   {
     id: 'moor', ru: 'Швартовка в марине (мотор)', en: 'Mooring under engine', beaufort: 3, gusts: 0, shifts: 0, motor: true,

@@ -9,17 +9,18 @@ import { Renderer, type Mark } from '../sim/render';
 import { MISSIONS, MISSION_BY_ID, type MissionDef, type MissionRuntime } from '../sim/missions';
 import { hints, SAIL_STATE_RU } from '../sim/hints';
 import { createWorld, isBlocked, type World } from '../sim/world';
+import { createGdanskWorld, GDANSK_STARTS, GULF_ANCHOR } from '../sim/gdanskWorld';
+import {
+  loadConditions, saveConditions, resolveWindDir, resolveBft, gustFactor, placeFn, windFromRu, AREA_RU, DIR_OPTIONS,
+  VIS_RANGE, VIS_RU, type AreaId, type Conditions,
+} from '../sim/conditions';
 import { Traffic, TRAFFIC_RU } from '../sim/traffic';
 import { motorSimView } from './simMotor';
 
 interface SimPrefs {
   linkJib: boolean;
   showNoGo: boolean;
-  freeBft: number;
-  freeGusts: boolean;
-  freeWorld: boolean;
   freeTraffic: number;
-  freeNight: boolean;
 }
 
 const KEYS_HELP: [string, string][] = [
@@ -30,8 +31,9 @@ type Hold = 'away' | 'toward' | 'mainIn' | 'mainOut' | 'jibIn' | 'jibOut';
 
 export function simView(root: HTMLElement, params: URLSearchParams): () => void {
   if (MISSION_BY_ID[params.get('m') ?? '']?.motor) return motorSimView(root, params);
-  const prefs: SimPrefs = load('simPrefs', { linkJib: true, showNoGo: true, freeBft: 3, freeGusts: true, freeWorld: true, freeTraffic: 1, freeNight: false });
+  const prefs: SimPrefs = load('simPrefs', { linkJib: true, showNoGo: true, freeTraffic: 1 });
   const savePrefs = () => save('simPrefs', prefs);
+  const cond: Conditions = loadConditions();
   const simple = () => settings.steerMode === 'bow';
 
   let mission: MissionDef = MISSION_BY_ID[params.get('m') ?? ''] ?? MISSIONS[0];
@@ -50,6 +52,10 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   let world: World | null = null;
   let traffic: Traffic | null = null;
   let night = false;
+  let area: AreaId = 'open';
+  let windDeg = 0;
+  let bft = 3;
+  let speedMul = 1;
   let safeTrail: { x: number; y: number; heading: number }[] = [];
   let safeTimer = 0;
   const held = new Set<Hold>();
@@ -74,13 +80,17 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     mission = MISSION_BY_ID[missionSel.value]; reset(true);
   });
   const pauseBtn = h('button', { class: 'btn secondary small', onClick: () => togglePause() }, '⏸');
+  const speedBtn = h('button', { class: 'btn secondary small', title: 'Ускорение времени', onClick: () => {
+    speedMul = speedMul >= 8 ? 1 : speedMul * 2; speedBtn.textContent = `×${speedMul}`;
+  } }, '×1');
   const bar = h('div', { class: 'sim-bar' },
     missionSel,
     h('button', { class: 'btn secondary small', title: 'Заново (R)', onClick: () => reset(true) }, '⟳'),
     pauseBtn,
-    h('button', { class: 'btn secondary small', title: 'Отдалить', onClick: () => (zoom = Math.max(0.3, zoom / 1.25)) }, '−'),
-    h('button', { class: 'btn secondary small', title: 'Приблизить', onClick: () => (zoom = Math.min(3, zoom * 1.25)) }, '+'),
-    h('button', { class: 'btn secondary small', title: 'Настройки', onClick: () => showSettings() }, '⚙'),
+    h('button', { class: 'btn secondary small', title: 'Отдалить', onClick: () => (zoom = Math.max(world?.water ? 0.012 : 0.3, zoom / (world?.water ? 1.6 : 1.25))) }, '−'),
+    h('button', { class: 'btn secondary small', title: 'Приблизить', onClick: () => (zoom = Math.min(3, zoom * (world?.water ? 1.6 : 1.25))) }, '+'),
+    speedBtn,
+    h('button', { class: 'btn secondary small', title: 'Условия и настройки', onClick: () => showSettings() }, '⚙'),
     h('span', { class: 'keys' }, KEYS_HELP.map(([k, t]) => h('span', { style: { marginRight: '8px' } }, h('kbd', null, k), ' ', t))),
   );
 
@@ -128,22 +138,38 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   // ---------- Simulation ----------
   function reset(showIntro: boolean): void {
     const isFree = mission.id === 'free';
-    world = mission.world || (isFree && prefs.freeWorld) ? createWorld() : null;
-    night = !!mission.night || (isFree && prefs.freeNight);
+    area = mission.realMap ? 'gdansk' : mission.world ? 'training' : isFree ? cond.freeArea : cond.area === 'gdansk' ? 'gdansk' : 'open';
+    world = area === 'gdansk' ? createGdanskWorld() : area === 'training' ? createWorld() : null;
+    night = cond.night === 'night' || (cond.night === 'auto' && !!mission.night);
+    renderer.fogRange = VIS_RANGE[cond.vis];
     const tcount = mission.traffic ?? (isFree ? prefs.freeTraffic : 0);
     traffic = tcount > 0 ? new Traffic(tcount, world) : null;
-    const st = isFree && world ? { ...mission.start, x: 20, y: 0 } : mission.start;
-    s = initialState(st.heading, st.x, st.y, st.speed, 0);
-    c.tiller = 0; c.main = st.main; c.jib = st.main;
-    tillerCmd = 0;
-    const bft = isFree ? prefs.freeBft : mission.beaufort;
+    windDeg = resolveWindDir(cond, mission.windDeg ?? 0);
+    bft = resolveBft(cond, mission.beaufort);
+    const wFrom = windDeg * DEG;
+    const gf = gustFactor(cond.gusts);
     windModel = {
-      base: { from: 0, speed: BEAUFORT_MS[bft] ?? 4.4 },
-      gustiness: isFree ? (prefs.freeGusts ? mission.gusts : 0) : mission.gusts,
-      shifts: isFree ? (prefs.freeGusts ? mission.shifts : 0) : mission.shifts,
+      base: { from: wFrom, speed: BEAUFORT_MS[bft] ?? 4.4 },
+      gustiness: gf ? gf.gust : mission.gusts,
+      shifts: gf ? gf.shift * DEG : mission.shifts,
       seed: Math.random() * 100,
     };
     runtime = mission.create();
+    let st = { ...mission.start };
+    if (mission.windRelative) {
+      const anchor = area === 'gdansk' ? GULF_ANCHOR : { x: 0, y: 0 };
+      const place = placeFn(windDeg, anchor.x, anchor.y);
+      [st.x, st.y] = place(st.x, st.y);
+      st.heading += wFrom;
+      for (const m of runtime.marks) [m.x, m.y] = place(m.x, m.y);
+    } else if (isFree) {
+      const p = area === 'gdansk' ? GDANSK_STARTS.find(([id]) => id === cond.freeStart) ?? GDANSK_STARTS[0] : null;
+      st = { ...st, x: p ? p[2] : area === 'training' ? 20 : 0, y: p ? p[3] : 0 };
+      st.heading = bestHeading(st.x, st.y, wFrom);
+    }
+    s = initialState(st.heading, st.x, st.y, st.speed, wFrom);
+    c.tiller = 0; c.main = st.main; c.jib = st.main;
+    tillerCmd = 0;
     time = 0;
     finished = false;
     counters = { tacks: 0, gybes: 0, crashGybes: 0 };
@@ -151,11 +177,13 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     safeTrail = [{ x: s.x, y: s.y, heading: s.heading }];
     renderer.reset();
     renderer.showNoGo = prefs.showNoGo;
-    zoom = night ? 0.3 : world ? 0.6 : traffic ? 0.7 : 1;
+    zoom = night ? 0.3 : world?.water ? 0.5 : world ? 0.6 : traffic ? 0.7 : 1;
+    if (Number.isFinite(renderer.fogRange)) zoom = Math.max(zoom, 0.6);
     // Let the sails settle into position before the start.
     for (let i = 0; i < 60; i++) {
       const keep = { x: s.x, y: s.y, heading: s.heading, u: s.u };
       tel = step(s, c, windAt(windModel, 0), 1 / 60).t;
+      lastWind = windAt(windModel, 0);
       Object.assign(s, keep, { v: 0, r: 0, heel: 0 });
     }
     held.clear();
@@ -168,11 +196,11 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     pauseBtn.textContent = '▶';
     clear(overlay);
     overlay.style.display = '';
-    const bft = mission.id === 'free' ? prefs.freeBft : mission.beaufort;
     overlay.append(h('div', { class: 'panel' },
       h('h2', { style: { marginTop: '0' } }, mission.ru, ' ', h('span', { class: 'en small' }, mission.en)),
       h('p', null, mission.descRu),
-      h('p', { class: 'small muted' }, `Ветер: ${bft} балла по Бофорту (~${Math.round(BEAUFORT_MS[bft] * 1.944)} уз), дует с севера — сверху экрана.`),
+      h('p', { class: 'small muted' }, `Ветер ${windFromRu(windDeg)}, ${bft} балл${bft === 1 ? '' : bft < 5 ? 'а' : 'ов'} по Бофорту (~${Math.round(BEAUFORT_MS[bft] * 1.944)} уз)${night ? ', ночь' : ''}${cond.vis !== 'clear' ? `, ${VIS_RU[cond.vis]}` : ''}. Север — сверху экрана, стрелка ветра — справа вверху.`),
+      conditionsBlock(),
       h('ul', { class: 'small' },
         h('li', null, simple()
           ? 'Румпель: «Привестись» — нос к ветру, «Увалиться» — нос от ветра.'
@@ -180,10 +208,53 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
         h('li', null, 'Шкоты: «Выбрать» — парус ближе к ДП, «Потравить» — дальше. Состояние парусов показано под кнопками.'),
         h('li', null, 'После каждого поворота оверштаг или фордевинд — команда «Смена борта»: экипаж пересаживается, стаксель перекидывается на новый борт.'),
         world ? h('li', null, 'Не выходите на берег и мели. Мини-карта справа — как картплоттер.') : null,
+        world?.water ? h('li', null, 'Реальная карта большая: кнопки «−/+» меняют масштаб, «×1» ускоряет время. Береговая линия и молы — по данным OpenStreetMap, глубины не показаны: держитесь фарватеров.') : null,
         traffic ? h('li', null, 'Красный пунктир вокруг судна — уступаете вы; зелёный — уступают вам.') : null),
       h('p', { class: 'keys' }, KEYS_HELP.map(([k, t]) => h('span', { style: { marginRight: '10px', display: 'inline-block' } }, h('kbd', null, k), ' ', t))),
       h('button', { class: 'btn', onClick: () => { overlay.style.display = 'none'; paused = false; pauseBtn.textContent = '⏸'; } }, 'Старт'),
     ));
+  }
+
+  /** Heading on a beam reach (or close to it) with the most open water ahead. */
+  function bestHeading(x: number, y: number, wFrom: number): number {
+    let best = wFrom + 90 * DEG, bestLen = -1;
+    for (const off of [90, -90, 110, -110, 70, -70, 135, -135, 160, -160]) {
+      const hd = wFrom + off * DEG;
+      let len = 0;
+      while (len < 400 && !(world && isBlocked(world, x + Math.sin(hd) * len, y + Math.cos(hd) * len))) len += 10;
+      if (len > bestLen + 30) { best = hd; bestLen = len; }
+    }
+    return best;
+  }
+
+  /** Selects for map, wind and visibility — shown in the intro and in ⚙. */
+  function conditionsBlock(): HTMLElement {
+    const isFree = mission.id === 'free';
+    const sel = (label: string, opts: [string, string][], val: string, fn: (v: string) => void) => {
+      const el = h('select', { 'aria-label': label }, opts.map(([v, t]) => h('option', { value: v }, t)));
+      el.value = val;
+      el.addEventListener('change', () => { fn(el.value); saveConditions(cond); reset(true); });
+      return h('label', { class: 'cond' }, h('span', { class: 'small muted' }, label), el);
+    };
+    const num = (v: string) => (v === 'auto' || v === 'random' ? v : Number(v));
+    const areaEl = mission.realMap || mission.world
+      ? h('label', { class: 'cond' }, h('span', { class: 'small muted' }, 'Карта'), h('span', null, mission.realMap ? 'Гданьск (реальная карта)' : 'Учебная акватория'))
+      : isFree
+        ? sel('Карта', (['gdansk', 'training', 'open'] as AreaId[]).map((a) => [a, AREA_RU[a]]), cond.freeArea, (v) => { cond.freeArea = v as AreaId; })
+        : sel('Карта', (['open', 'gdansk'] as AreaId[]).map((a) => [a, a === 'gdansk' ? 'Гданьский залив (реальная карта)' : AREA_RU[a]]), cond.area === 'gdansk' ? 'gdansk' : 'open', (v) => { cond.area = v as AreaId; });
+    const dirOpts = DIR_OPTIONS.map(([v, t]): [string, string] => [v, v === 'auto' ? `как в задании (${windFromRu(mission.windDeg ?? 0)})` : t]);
+    return h('div', { class: 'cond-grid' },
+      areaEl,
+      isFree && area === 'gdansk' ? sel('Место старта', GDANSK_STARTS.map(([id, name]) => [id, name]), cond.freeStart, (v) => { cond.freeStart = v; }) : null,
+      sel('Направление ветра', dirOpts, String(cond.windDir), (v) => { cond.windDir = num(v) as Conditions['windDir']; }),
+      sel('Сила ветра', [['auto', `как в задании (${mission.beaufort} б.)`], ['random', 'случайная (2–4 б.)'],
+        ...[1, 2, 3, 4, 5, 6].map((b): [string, string] => [String(b), `${b} балл${b === 1 ? '' : b < 5 ? 'а' : 'ов'} (~${Math.round(BEAUFORT_MS[b] * 1.944)} уз)`])],
+      String(cond.bft), (v) => { cond.bft = num(v) as Conditions['bft']; }),
+      sel('Порывы и заходы', [['auto', 'как в задании'], ['none', 'ровный ветер'], ['light', 'небольшие'], ['strong', 'сильные']], cond.gusts, (v) => { cond.gusts = v as Conditions['gusts']; }),
+      sel('Время суток', [['auto', 'как в задании'], ['day', 'день'], ['night', 'ночь (видны огни)']], cond.night, (v) => { cond.night = v as Conditions['night']; }),
+      sel('Видимость', [['clear', 'ясно'], ['haze', 'дымка (~150 м)'], ['fog', 'туман (~50 м)']], cond.vis, (v) => { cond.vis = v as Conditions['vis']; }),
+      isFree ? sel('Другие суда', [['0', 'нет'], ['1', '1 судно'], ['2', '2 судна'], ['3', '3 судна']], String(prefs.freeTraffic), (v) => { prefs.freeTraffic = Number(v); savePrefs(); }) : null,
+    );
   }
 
   function finish(won: boolean, text: string): void {
@@ -263,21 +334,16 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       return h('div', null, h('div', { class: 'small muted' }, label), el);
     };
     overlay.append(h('div', { class: 'panel' },
-      h('h2', { style: { marginTop: '0' } }, 'Настройки'),
+      h('h2', { style: { marginTop: '0' } }, 'Условия и настройки'),
+      h('p', { class: 'small muted' }, 'Условия применяются сразу — упражнение начнётся заново.'),
+      conditionsBlock(),
       h('div', { class: 'settings-grid' },
-        h('b', null, 'Свободное плавание'),
-        sel('Ветер', [1, 2, 3, 4, 5].map((b) => [String(b), `${b} балл${b === 1 ? '' : b < 5 ? 'а' : 'ов'} (~${Math.round(BEAUFORT_MS[b] * 1.944)} уз)`]), String(prefs.freeBft), (v) => { prefs.freeBft = Number(v); savePrefs(); }),
-        cb('Порывы и заходы ветра', prefs.freeGusts, (v) => { prefs.freeGusts = v; savePrefs(); }),
-        cb('Берег, марина, фарватер, знаки и маяки', prefs.freeWorld, (v) => { prefs.freeWorld = v; savePrefs(); }),
-        sel('Другие суда', [['0', 'нет'], ['1', '1 судно'], ['2', '2 судна'], ['3', '3 судна']], String(prefs.freeTraffic), (v) => { prefs.freeTraffic = Number(v); savePrefs(); }),
-        cb('Ночь (видны только огни)', prefs.freeNight, (v) => { prefs.freeNight = v; savePrefs(); }),
         h('b', null, 'Общие'),
         sel('Кнопки руля', [['tiller', 'От себя / К себе (как на лодке)'], ['bow', 'Привестись / Увалиться (упрощённо)']], settings.steerMode, (v) => {
           settings.steerMode = v as 'tiller' | 'bow'; saveSettings(); awayBtn.update(); towardBtn.update();
         }),
         cb('Показывать мёртвую зону', prefs.showNoGo, (v) => { prefs.showNoGo = v; renderer.showNoGo = v; savePrefs(); }),
       ),
-      h('p', { class: 'small muted' }, 'Настройки свободного плавания применяются после перезапуска.'),
       h('div', { class: 'row' },
         h('button', { class: 'btn', onClick: () => { overlay.style.display = 'none'; paused = finished || wasPaused; pauseBtn.textContent = paused ? '▶' : '⏸'; } }, 'Закрыть'),
         h('button', { class: 'btn secondary', onClick: () => reset(true) }, 'Перезапустить')),
@@ -383,11 +449,12 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   }
 
   function frame(now: number): void {
-    const dt = Math.min(0.05, (now - last) / 1000);
+    const rdt = Math.min(0.05, (now - last) / 1000);
+    const dt = rdt * (paused ? 1 : speedMul);
     last = now;
     if (!paused) {
-      applyControls(dt);
-      const sub = 4;
+      applyControls(rdt);
+      const sub = 4 * speedMul;
       const events: SimEvent[] = [];
       for (let i = 0; i < sub; i++) {
         const w = windAt(windModel, time);
@@ -412,13 +479,13 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
       }
       if (s.capsized) capsized();
       else if (!checkGround() && tel && !finished) {
-        const res = runtime.update({ s, t: tel, time, dt, events, marks: runtime.marks, counters, world, traffic });
+        const res = runtime.update({ s, t: tel, time, dt, events, marks: runtime.marks, counters, world, traffic, windFrom: windModel.base.from });
         if (res) finish(res.won, res.textRu);
       }
     }
-    if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) toast.style.opacity = '0'; }
+    if (toastTimer > 0) { toastTimer -= rdt; if (toastTimer <= 0) toast.style.opacity = '0'; }
     renderer.draw(s, c, tel, lastWind, runtime.marks as Mark[], time, paused ? 0 : dt, zoom, { world, vessels: traffic?.vessels ?? [], night });
-    hudTimer -= dt;
+    hudTimer -= rdt;
     if (hudTimer <= 0) { hudTimer = 0.12; updateHud(); }
     raf = requestAnimationFrame(frame);
   }

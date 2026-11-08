@@ -1,16 +1,27 @@
 import { describe, it, expect } from 'vitest';
 import { initialState, step, switchSide, windAt, wrap, DEG, BEAUFORT_MS, type Controls, type Telemetry, type BoatState } from '../src/sim/physics';
 import { MISSION_BY_ID, type MissionResult } from '../src/sim/missions';
-import { createWorld, isBlocked } from '../src/sim/world';
+import { createWorld, isBlocked, type World } from '../src/sim/world';
+import { createGdanskWorld, GULF_ANCHOR } from '../src/sim/gdanskWorld';
+import { placeFn } from '../src/sim/conditions';
 
 /** Run a mission with a scripted pilot that returns the desired heading. */
-function run(id: string, pilot: (s: BoatState, t: Telemetry | null, time: number) => { heading: number; sheet?: number }, maxTime = 400): { res: MissionResult | null; time: number } {
+function run(id: string, pilot: (s: BoatState, t: Telemetry | null, time: number) => { heading: number; sheet?: number }, maxTime = 400,
+  opts: { windDeg?: number; world?: World | null; anchor?: { x: number; y: number } } = {}): { res: MissionResult | null; time: number } {
   const m = MISSION_BY_ID[id];
-  const s = initialState(m.start.heading, m.start.x, m.start.y, m.start.speed, 0);
-  const c: Controls = { tiller: 0, main: m.start.main, jib: m.start.main, board: 1 };
-  const wm = { base: { from: 0, speed: BEAUFORT_MS[m.beaufort] }, gustiness: 0, shifts: 0, seed: 1 };
+  const wDeg = opts.windDeg ?? m.windDeg ?? 0;
   const rt = m.create();
-  const world = m.world ? createWorld() : null;
+  const st = { ...m.start };
+  if (m.windRelative && (wDeg || opts.anchor)) {
+    const place = placeFn(wDeg, opts.anchor?.x ?? 0, opts.anchor?.y ?? 0);
+    [st.x, st.y] = place(st.x, st.y);
+    st.heading += wDeg * DEG;
+    for (const mk of rt.marks) [mk.x, mk.y] = place(mk.x, mk.y);
+  }
+  const s = initialState(st.heading, st.x, st.y, st.speed, wDeg * DEG);
+  const c: Controls = { tiller: 0, main: m.start.main, jib: m.start.main, board: 1 };
+  const wm = { base: { from: wDeg * DEG, speed: BEAUFORT_MS[m.beaufort] }, gustiness: 0, shifts: 0, seed: 1 };
+  const world = opts.world !== undefined ? opts.world : m.world ? createWorld() : m.realMap ? createGdanskWorld() : null;
   const counters = { tacks: 0, gybes: 0, crashGybes: 0 };
   let t: Telemetry | null = null;
   const dt = 1 / 60;
@@ -33,7 +44,7 @@ function run(id: string, pilot: (s: BoatState, t: Telemetry | null, time: number
     }
     if (s.capsized) return { res: { won: false, textRu: 'capsize' }, time };
     if (world && isBlocked(world, s.x + Math.sin(s.heading) * 2, s.y + Math.cos(s.heading) * 2) && Math.hypot(s.u, s.v) > 0.8) return { res: { won: false, textRu: `aground at ${s.x.toFixed(0)},${s.y.toFixed(0)}` }, time };
-    const res = rt.update({ s, t, time, dt, events: r.events, marks: rt.marks, counters, world, traffic: null });
+    const res = rt.update({ s, t, time, dt, events: r.events, marks: rt.marks, counters, world, traffic: null, windFrom: wDeg * DEG });
     if (res) return { res, time };
   }
   return { res: null, time: maxTime };
@@ -93,4 +104,48 @@ describe('missions are completable', () => {
     const round = run('cardinals', follow([[140, 220], [140, 70], [80, 20]], 8));
     expect(round.res?.won, round.res?.textRu).toBe(true);
   });
+
+  /** Head for each mark in turn, never pointing closer than 48° to the wind (tacking when needed). */
+  const markPilot = (marks: { x: number; y: number }[], windFrom: number, radius: number) => {
+    let i = 0, tack = 1;
+    return (s: BoatState) => {
+      while (i < marks.length - 1 && Math.hypot(marks[i].x - s.x, marks[i].y - s.y) < radius) i++;
+      const b = Math.atan2(marks[i].x - s.x, marks[i].y - s.y);
+      const off = wrap(b - windFrom);
+      if (Math.abs(off) >= 48 * DEG) return { heading: b };
+      if (tack === 1 && off < -40 * DEG) tack = -1;
+      else if (tack === -1 && off > 40 * DEG) tack = 1;
+      return { heading: windFrom + tack * 48 * DEG };
+    };
+  };
+
+  it('wind-relative exercises rotate with the wind and fit in the Gdańsk gulf', () => {
+    for (const wDeg of [90, 225]) {
+      const rt = MISSION_BY_ID.triangle.create();
+      const place = placeFn(wDeg, GULF_ANCHOR.x, GULF_ANCHOR.y);
+      const marks = rt.marks.map((mk) => { const [x, y] = place(mk.x, mk.y); return { x, y }; });
+      // The first mark of the triangle lies straight upwind of the start area.
+      const up = Math.atan2(marks[0].x - marks[2].x, marks[0].y - marks[2].y);
+      expect(Math.abs(wrap(up - wDeg * DEG)) / DEG).toBeLessThan(1);
+      const res = run('triangle', markPilot(marks, wDeg * DEG, 8), 600, { windDeg: wDeg, world: createGdanskWorld(), anchor: GULF_ANCHOR });
+      expect(res.res?.won, `${wDeg}: ${res.res?.textRu}`).toBe(true);
+    }
+  });
+
+  // Waypoints a skipper would pick from the chart (the mission marks plus turns in the channel).
+  const ROUTES: Record<string, [number, number][]> = {
+    gd_entry: [[-250, 7450], [80, 6600], [150, 6380], [260, 6220], [600, 6040]],
+    gd_ncz: [[7740, 2380], [7860, 2150], [7880, 2000], [7865, 1890], [7830, 1830]],
+  };
+  for (const id of Object.keys(ROUTES)) {
+    it(`real-chart task ${id} can be sailed without running aground`, () => {
+      const m = MISSION_BY_ID[id];
+      const marks = m.create().marks;
+      const w = createGdanskWorld();
+      expect(isBlocked(w, m.start.x, m.start.y)).toBeNull();
+      for (const mk of marks) expect(isBlocked(w, mk.x, mk.y), `${mk.label}`).toBeNull();
+      const res = run(id, markPilot(ROUTES[id].map(([x, y]) => ({ x, y })), (m.windDeg ?? 0) * DEG, 20), 3000);
+      expect(res.res?.won, res.res?.textRu).toBe(true);
+    });
+  }
 });

@@ -34,6 +34,9 @@ export class Renderer {
   private wake: { x: number; y: number }[] = [];
   private wakeTimer = 0;
   showNoGo = true;
+  /** Visibility in metres (Infinity = clear). */
+  fogRange = Infinity;
+  private paths = new WeakMap<World, Path2D>();
 
   constructor(private canvas: HTMLCanvasElement) {}
 
@@ -69,8 +72,13 @@ export class Renderer {
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, w, h);
 
-    this.drawGrid(v);
-    if (scene.world) this.drawWorld(v, scene.world);
+    if (scene.world?.water) {
+      this.drawWorld(v, scene.world);
+      this.drawGrid(v);
+    } else {
+      this.drawGrid(v);
+      if (scene.world) this.drawWorld(v, scene.world);
+    }
     this.drawWindParticles(v, wind, dt);
     this.updateWake(s, dt);
     this.drawWake(v);
@@ -85,7 +93,17 @@ export class Renderer {
       for (const m of marks) this.drawMark(v, m, time);
       ctx.globalAlpha = 1;
     }
+    if (Number.isFinite(this.fogRange)) this.drawFog(v, scene.night);
     this.drawBoat(v, s, c, t, time);
+    if (k < 4) {
+      // Zoomed out on a big chart: a plotter-style arrow so the boat stays visible.
+      ctx.save();
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate(s.heading);
+      ctx.fillStyle = '#ffeb3b'; ctx.strokeStyle = '#222'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(0, -11); ctx.lineTo(7, 8); ctx.lineTo(0, 4); ctx.lineTo(-7, 8); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
     if (scene.night) {
       if (scene.world) this.drawLights(v, scene.world, time);
       for (const vs of scene.vessels) this.drawNavLights(v, vs.x, vs.y, vs.heading, vs.type === 'motor' || vs.type === 'ship', vs.halfL);
@@ -96,12 +114,97 @@ export class Renderer {
       if (vs.encounter) this.drawOffscreen(v, { x: vs.x, y: vs.y, kind: 'mark' }, s, vs.encounter.giveWay === 'own' ? 'rgba(255,70,70,0.95)' : 'rgba(80,230,120,0.95)');
     }
     if (scene.world) this.drawMinimap(v, scene, s, marks);
+    if (scene.world?.attribution) {
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      ctx.textAlign = 'center';
+      ctx.fillText(scene.world.attribution, w / 2, h - 4);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  private drawFog(v: View, night: boolean): void {
+    const { ctx, w, h, k } = v;
+    const r = this.fogRange * k;
+    const col = night ? '4,10,22' : '196,204,210';
+    const g = ctx.createRadialGradient(w / 2, h / 2, r * 0.35, w / 2, h / 2, r);
+    g.addColorStop(0, `rgba(${col},0)`);
+    g.addColorStop(1, `rgba(${col},0.97)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  private waterPath(w: World): Path2D {
+    let p = this.paths.get(w);
+    if (!p) {
+      p = new Path2D();
+      for (const ring of w.water!) {
+        ring.forEach(([x, y], i) => (i ? p!.lineTo(x, y) : p!.moveTo(x, y)));
+        p.closePath();
+      }
+      this.paths.set(w, p);
+    }
+    return p;
+  }
+
+  /** Real map: land everywhere, water polygons on top (even–odd), bridges, marinas, labels. */
+  private drawRealMap(v: View, w: World, night: boolean): void {
+    const { ctx, k } = v;
+    const path = this.waterPath(w);
+    ctx.save();
+    ctx.translate(v.w / 2, v.h / 2);
+    ctx.scale(k, -k);
+    ctx.translate(-v.camX, -v.camY);
+    if (night) {
+      ctx.strokeStyle = 'rgba(160,190,220,0.3)';
+      ctx.lineWidth = 1.5 / k;
+      ctx.stroke(path);
+      ctx.restore();
+      return;
+    }
+    ctx.fillStyle = '#d8c58e';
+    ctx.fillRect(v.camX - v.w / 2 / k - 10, v.camY - v.h / 2 / k - 10, v.w / k + 20, v.h / k + 20);
+    ctx.fillStyle = '#2a7cb7';
+    ctx.fill(path, 'evenodd');
+    ctx.strokeStyle = 'rgba(244,234,208,0.9)';
+    ctx.lineWidth = Math.max(1.5, 0.4 * k) / k;
+    ctx.stroke(path);
+    ctx.fillStyle = 'rgba(110,110,110,0.75)';
+    for (const b of w.bridges ?? []) {
+      ctx.beginPath();
+      b.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,90,90,0.85)';
+    ctx.setLineDash([6 / k, 4 / k]);
+    ctx.lineWidth = 1.5 / k;
+    for (const m of w.marinaOutlines ?? []) {
+      ctx.beginPath();
+      m.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath(); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    for (const l of w.labels ?? []) {
+      const [x, y] = this.toScreen(v, l.x, l.y);
+      if (x < -150 || y < -20 || x > v.w + 150 || y > v.h + 20) continue;
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.strokeText(l.text, x, y);
+      ctx.fillStyle = '#fff'; ctx.fillText(l.text, x, y);
+    }
+    ctx.textAlign = 'left';
   }
 
   // ---------- World ----------
 
   private drawWorld(v: View, w: World, nightOutline = false): void {
     const { ctx, k } = v;
+    if (w.water) {
+      this.drawRealMap(v, w, nightOutline);
+      if (!nightOutline) for (const lh of w.lighthouses) this.drawLighthouse(v, lh.x, lh.y, false, lh.light.color);
+      return;
+    }
     for (const poly of w.land) {
       ctx.beginPath();
       poly.forEach(([x, y], i) => { const [sx, sy] = this.toScreen(v, x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); });
@@ -157,7 +260,7 @@ export class Renderer {
     drawBuoyIcon(v.ctx, x, y, b.kind, hgt);
   }
 
-  private drawLighthouse(v: View, x0: number, y0: number, big: boolean): void {
+  private drawLighthouse(v: View, x0: number, y0: number, big: boolean, color?: Light['color']): void {
     const { ctx } = v;
     const [x, y] = this.toScreen(v, x0, y0);
     if (x < -60 || y < -80 || x > v.w + 60 || y > v.h + 60) return;
@@ -169,7 +272,7 @@ export class Renderer {
     ctx.beginPath();
     ctx.moveTo(x - wdt / 2, y); ctx.lineTo(x - wdt / 3, y - hgt); ctx.lineTo(x + wdt / 3, y - hgt); ctx.lineTo(x + wdt / 2, y); ctx.closePath();
     ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#d7262e';
+    ctx.fillStyle = color === 'green' ? '#1f9a48' : color === 'yellow' ? '#e0b000' : '#d7262e';
     for (let i = 1; i < 4; i += 2) ctx.fillRect(x - wdt / 2.3, y - hgt * (i + 1) / 4.5, wdt / 1.15, hgt / 9);
     ctx.fillStyle = '#ffe9a6';
     ctx.fillRect(x - wdt / 3, y - hgt - wdt / 2.5, wdt / 1.5, wdt / 2.5);
@@ -289,6 +392,20 @@ export class Renderer {
     ctx.beginPath(); ctx.rect(ox, oy, bw * sc, bh * sc); ctx.clip();
     ctx.fillStyle = 'rgba(20,70,110,0.85)';
     ctx.fillRect(ox, oy, bw * sc, bh * sc);
+    if (w.water) {
+      ctx.fillStyle = '#cdb77f';
+      ctx.fillRect(ox, oy, bw * sc, bh * sc);
+      ctx.save();
+      ctx.translate(ox - w.bounds.minX * sc, oy + w.bounds.maxY * sc);
+      ctx.scale(sc, -sc);
+      ctx.fillStyle = 'rgba(20,70,110,0.95)';
+      ctx.fill(this.waterPath(w), 'evenodd');
+      ctx.restore();
+      // Visible area of the main view.
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(mx(v.camX - v.w / 2 / v.k), my(v.camY + v.h / 2 / v.k), Math.max(2, (v.w / v.k) * sc), Math.max(2, (v.h / v.k) * sc));
+    }
     ctx.fillStyle = '#cdb77f';
     for (const poly of w.land) {
       ctx.beginPath();

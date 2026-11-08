@@ -1,4 +1,5 @@
 import { h, clear } from '../lib/dom';
+import { loadConditions, saveConditions, resolveBft, resolveWindDir, windNameRu, DIR_OPTIONS, VIS_RANGE, VIS_RU, type Conditions } from '../sim/conditions';
 import { load, save } from '../lib/store';
 import { missionLabel, recordMission } from '../lib/progress';
 import { DEG, BEAUFORT_MS, wrap } from '../sim/physics';
@@ -20,6 +21,7 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
   const mission: MissionDef = MISSION_BY_ID[params.get('m') ?? ''] ?? MISSIONS[0];
   const leaving = mission.id === 'unmoor';
   const prefs = load('motorPrefs', { harbour: 'random' });
+  const cond: Conditions = loadConditions();
 
   let harbour: Harbour;
   let s: MotorState;
@@ -94,8 +96,11 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
     s = leaving ? motorInit(t) : motorInit(harbour.arrival, 1.1);
     // The helmsman starts on the side facing the open water (or starboard).
     s.helmSide = 1;
-    const bft = 2 + Math.floor(Math.random() * 3);
-    wind = { from: Math.floor(Math.random() * 8) * 45 * DEG, speed: BEAUFORT_MS[bft] };
+    const bft = cond.bft === 'auto' ? 2 + Math.floor(Math.random() * 3) : resolveBft(cond, 3);
+    const dir = cond.windDir === 'auto' ? Math.floor(Math.random() * 8) * 45 : resolveWindDir(cond);
+    wind = { from: dir * DEG, speed: BEAUFORT_MS[bft] };
+    renderer.night = cond.night === 'night';
+    renderer.fogRange = VIS_RANGE[cond.vis];
     tiller = 0; tillerCmd = 0; time = 0; finished = false; touches = 0; hold = 0; buoyTaken = false; tel = null;
     zoom = 1;
     renderer.reset();
@@ -104,8 +109,29 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
   }
 
   function windRu(): string {
-    const names = ['северный', 'северо-восточный', 'восточный', 'юго-восточный', 'южный', 'юго-западный', 'западный', 'северо-западный'];
-    return names[Math.round((((wind.from / DEG) % 360) + 360) % 360 / 45) % 8];
+    return windNameRu(wind.from / DEG);
+  }
+
+  /** Map, wind and visibility selects (shared with the sailing exercises). */
+  function conditionsBlock(): HTMLElement {
+    const sel = (label: string, opts: [string, string][], val: string, fn: (v: string) => void) => {
+      const el = h('select', { 'aria-label': label }, opts.map(([v, t]) => h('option', { value: v }, t)));
+      el.value = val;
+      el.addEventListener('change', () => { fn(el.value); saveConditions(cond); reset(true); });
+      return h('label', { class: 'cond' }, h('span', { class: 'small muted' }, label), el);
+    };
+    const num = (v: string) => (v === 'auto' || v === 'random' ? v : Number(v));
+    const hb = h('select', { 'aria-label': 'Марина' }, h('option', { value: 'random' }, 'случайная'), HARBOURS.map((x) => h('option', { value: x.id }, x.nameRu)));
+    hb.value = prefs.harbour;
+    hb.addEventListener('change', () => { prefs.harbour = hb.value; harbourSel.value = hb.value; save('motorPrefs', prefs); reset(true); });
+    return h('div', { class: 'cond-grid' },
+      h('label', { class: 'cond' }, h('span', { class: 'small muted' }, 'Марина'), hb),
+      sel('Направление ветра', DIR_OPTIONS.filter(([v]) => v !== 'random').map(([v, t]): [string, string] => [v, v === 'auto' ? 'случайное' : t]), String(cond.windDir === 'random' ? 'auto' : cond.windDir), (v) => { cond.windDir = num(v) as Conditions['windDir']; }),
+      sel('Сила ветра', [['auto', 'случайная (2–4 б.)'], ...[1, 2, 3, 4, 5, 6].map((b): [string, string] => [String(b), `${b} балл${b === 1 ? '' : b < 5 ? 'а' : 'ов'} (~${Math.round(BEAUFORT_MS[b] * 1.944)} уз)`])],
+        String(cond.bft === 'random' ? 'auto' : cond.bft), (v) => { cond.bft = num(v) as Conditions['bft']; }),
+      sel('Время суток', [['auto', 'день'], ['night', 'ночь (огни)']], cond.night === 'night' ? 'night' : 'auto', (v) => { cond.night = v as Conditions['night']; }),
+      sel('Видимость', [['clear', 'ясно'], ['haze', 'дымка (~150 м)'], ['fog', 'туман (~50 м)']], cond.vis, (v) => { cond.vis = v as Conditions['vis']; }),
+    );
   }
 
   function intro(bft: number): void {
@@ -120,7 +146,8 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
         : 'Паруса убраны, идёте под мотором. Найдите своё место (зелёный пунктир) и ошвартуйтесь.'),
       h('p', null, h('b', null, 'Способ швартовки: '), harbour.mooringRu),
       harbour.attributionRu ? h('p', { class: 'small muted' }, harbour.attributionRu) : null,
-      h('p', { class: 'small muted' }, `Ветер ${windRu()}, ${bft} балла (~${Math.round(wind.speed * 1.944)} уз). Яхта 7,5 м, подвесной мотор, руль — румпелем. Руль работает только при потоке воды: на нейтрали без хода лодка почти не управляется, на заднем ходу руль слабый и работает наоборот. Короткий «газ вперёд» с переложенным рулём разворачивает лодку почти на месте.`),
+      h('p', { class: 'small muted' }, `Ветер ${windRu()}, ${bft} балл${bft === 1 ? '' : bft < 5 ? 'а' : 'ов'}${renderer.night ? ', ночь' : ''}${cond.vis !== 'clear' ? `, ${VIS_RU[cond.vis]}` : ''} (~${Math.round(wind.speed * 1.944)} уз). Яхта 7,5 м, подвесной мотор, руль — румпелем. Руль работает только при потоке воды: на нейтрали без хода лодка почти не управляется, на заднем ходу руль слабый и работает наоборот. Короткий «газ вперёд» с переложенным рулём разворачивает лодку почти на месте.`),
+      conditionsBlock(),
       h('p', { class: 'small muted' }, 'Касание на скорости до ~1 узла — это кранцы (засчитывается как касание); быстрее — удар.'),
       h('p', { class: 'keys' }, KEYS.map(([k, t]) => h('span', { style: { marginRight: '10px', display: 'inline-block' } }, h('kbd', null, k), ' ', t))),
       h('button', { class: 'btn', onClick: () => { overlay.style.display = 'none'; paused = false; pauseBtn.textContent = '⏸'; } }, 'Старт'),

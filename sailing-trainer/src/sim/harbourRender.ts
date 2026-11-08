@@ -7,6 +7,9 @@ const LIGHT: Record<string, string> = { red: '#ff3b3b', green: '#39ff6a', white:
 
 export class HarbourRenderer {
   private wake: { x: number; y: number; t: number }[] = [];
+  night = false;
+  /** Visibility in metres (Infinity = clear). */
+  fogRange = Infinity;
 
   constructor(private canvas: HTMLCanvasElement) {}
 
@@ -140,8 +143,41 @@ export class HarbourRenderer {
       ctx.fillStyle = 'rgba(40,40,40,0.75)';
       for (const lb of h.labels) ctx.fillText(lb.text, tx(lb.x), ty(lb.y));
     }
+    if (this.night) {
+      // Marinas are lit a little: pontoons stay faintly visible, navigation lights glow.
+      ctx.fillStyle = 'rgba(4,10,22,0.74)';
+      ctx.fillRect(0, 0, w, hgt);
+      for (const l of h.lights) {
+        if (!lightOn(l.char, time)) continue;
+        const r = Math.max(14, 2.5 * k);
+        const g = ctx.createRadialGradient(tx(l.x), ty(l.y), 0, tx(l.x), ty(l.y), r);
+        g.addColorStop(0, LIGHT[l.color]); g.addColorStop(0.3, LIGHT[l.color]); g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(tx(l.x), ty(l.y), r, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    if (Number.isFinite(this.fogRange)) {
+      const r = this.fogRange * k, col = this.night ? '4,10,22' : '196,204,210';
+      const g = ctx.createRadialGradient(w / 2, hgt / 2, r * 0.35, w / 2, hgt / 2, r);
+      g.addColorStop(0, `rgba(${col},0)`); g.addColorStop(1, `rgba(${col},0.97)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, hgt);
+    }
     // own boat
     this.drawOwn(ctx, s, tiller, tx, ty, k, time);
+    if (this.night) {
+      // Side lights at the bow: red to port, green to starboard; white stern light.
+      const sh = Math.sin(s.heading), ch = Math.cos(s.heading);
+      const glow = (x: number, y: number, col: string) => {
+        const g = ctx.createRadialGradient(tx(x), ty(y), 0, tx(x), ty(y), Math.max(8, 1.2 * k));
+        g.addColorStop(0, col); g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(tx(x), ty(y), Math.max(8, 1.2 * k), 0, Math.PI * 2); ctx.fill();
+      };
+      const bx = s.x + sh * (YACHT.halfL - 0.6), by = s.y + ch * (YACHT.halfL - 0.6);
+      glow(bx - ch * 0.6, by + sh * 0.6, LIGHT.red);
+      glow(bx + ch * 0.6, by - sh * 0.6, LIGHT.green);
+      glow(s.x - sh * YACHT.halfL, s.y - ch * YACHT.halfL, LIGHT.white);
+    }
     this.drawMinimap(ctx, h, s, w, hgt);
     if (h.attributionRu) {
       ctx.font = '10px system-ui, sans-serif';
