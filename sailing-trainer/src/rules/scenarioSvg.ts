@@ -21,7 +21,7 @@ export function scenarioSvg(sc: Scenario): string {
   for (let i = 0; i < 14; i++) for (let j = 0; j < 14; j++) {
     body += `<circle cx="${i * 30 + (j % 2) * 15 + 5}" cy="${j * 30 + 5}" r="1.2" fill="rgba(255,255,255,0.18)"/>`;
   }
-  if (sc.other.type === 'ship') body += fairway(sc.other, tx, ty);
+  if (sc.other.type === 'ship' && sc.context !== 'colreg') body += fairway(sc.other, tx, ty);
 
   // course lines
   for (const v of pts) {
@@ -60,6 +60,15 @@ function vessel(v: Vessel, windFrom: number, x: number, y: number, color: string
       const nx = boomSide * Math.cos(ang) * 4, ny = -Math.sin(ang) * 4;
       inner += `<path d="M0 -6 Q${bx / 2 + nx} ${(-6 + by) / 2 + ny} ${bx} ${by} Z" fill="#fff" stroke="#333" stroke-width="0.8"/>`;
       inner += `<line x1="0" y1="-6" x2="${bx}" y2="${by}" stroke="#333" stroke-width="1.6"/><circle cx="0" cy="-6" r="1.8" fill="#222"/>`;
+    } else if (v.type === 'motorsail') {
+      const twa = wrap(windFrom - v.heading);
+      const side = twa >= 0 ? -1 : 1;
+      inner += `<path d="M0 -6 Q${side * 4} 2 ${side * 3} 8 Z" fill="#fff" stroke="#333" stroke-width="0.8"/><line x1="0" y1="-6" x2="${side * 3}" y2="8" stroke="#333" stroke-width="1.4"/>`;
+      inner += `<path d="M-3 14 L-9 30 M3 14 L9 30" stroke="rgba(255,255,255,0.8)" stroke-width="1.4"/>`;
+    } else if (v.type === 'fishing') {
+      inner += `<rect x="-3" y="-2" width="6" height="6" fill="#eee" stroke="#333" stroke-width="0.6"/><path d="M-4 13 Q-12 40 0 52 Q12 40 4 13" fill="none" stroke="rgba(255,255,255,0.75)" stroke-width="1.2" stroke-dasharray="3 2"/>`;
+    } else if (v.type === 'ram') {
+      inner += `<rect x="-4" y="-6" width="8" height="12" fill="#f2b33d" stroke="#333" stroke-width="0.6"/>`;
     } else if (v.type === 'motor') {
       inner += `<rect x="-3.5" y="-4" width="7" height="7" fill="#eee" stroke="#333" stroke-width="0.6"/>`;
       inner += `<path d="M-5 14 L-14 34 M5 14 L14 34" stroke="rgba(255,255,255,0.8)" stroke-width="1.5"/>`;
@@ -67,7 +76,7 @@ function vessel(v: Vessel, windFrom: number, x: number, y: number, color: string
       inner += `<line x1="-16" y1="4" x2="16" y2="-2" stroke="#7a4a1e" stroke-width="1.8"/><line x1="-16" y1="-2" x2="16" y2="4" stroke="#7a4a1e" stroke-width="1.8"/><circle cx="0" cy="1" r="3" fill="#f2c6a0"/>`;
     }
   }
-  return `<g transform="translate(${x} ${y})"><g transform="rotate(${deg})">${inner}</g>
+  return `<g transform="translate(${x} ${y})"><g transform="rotate(${deg})">${inner}</g>${dayShape(v.type)}
     <text x="0" y="${v.type === 'ship' ? 52 : 30}" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" stroke="#123" stroke-width="3" paint-order="stroke" font-family="system-ui, sans-serif">${label}</text></g>`;
 }
 
@@ -83,4 +92,14 @@ function fairway(ship: Vessel, tx: (x: number) => number, ty: (y: number) => num
     }
   }
   return s;
+}
+
+/** Day shapes hoisted where they can be seen, drawn upright next to the vessel. */
+function dayShape(t: Vessel['type']): string {
+  const k = '#111';
+  const at = (inner: string) => `<g transform="translate(20 -22)"><rect x="-8" y="-4" width="16" height="38" rx="3" fill="rgba(255,255,255,0.85)"/>${inner}</g>`;
+  if (t === 'fishing') return at(`<polygon points="-6,0 6,0 0,10" fill="${k}"/><polygon points="0,14 6,24 -6,24" fill="${k}"/>`);
+  if (t === 'ram') return at(`<circle cx="0" cy="3" r="4.5" fill="${k}"/><polygon points="0,10 5,16 0,22 -5,16" fill="${k}"/><circle cx="0" cy="28" r="4.5" fill="${k}"/>`);
+  if (t === 'motorsail') return at(`<polygon points="-6,6 6,6 0,18" fill="${k}"/>`);
+  return '';
 }

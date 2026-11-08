@@ -1,7 +1,8 @@
 // Right-of-way scenarios for small sailing craft (COLREG/МППСС and inland CEVNI rules).
 
-export type VesselType = 'sail' | 'motor' | 'rowing' | 'ship';
-export type Context = 'colreg' | 'inland';
+export type VesselType = 'sail' | 'motor' | 'rowing' | 'ship' | 'fishing' | 'ram' | 'motorsail';
+/** colreg = open water; channel = narrow channel / traffic separation scheme; inland = CEVNI waters. */
+export type Context = 'colreg' | 'channel' | 'inland';
 
 export interface Vessel {
   x: number;
@@ -18,6 +19,11 @@ export interface Scenario {
   other: Vessel;
   windFrom: number;
   context: Context;
+  /** Multiple-choice question instead of "who gives way" (e.g. rule 17). */
+  choices?: { ru: string; correct: boolean }[];
+  questionRu?: string;
+  whyRu?: string;
+  ruleRu?: string;
 }
 
 export interface Verdict {
@@ -34,7 +40,10 @@ export const VESSEL_RU: Record<VesselType, string> = {
   sail: 'парусная лодка',
   motor: 'моторная лодка',
   rowing: 'гребная лодка',
-  ship: 'большое судно на фарватере',
+  ship: 'большое судно с механическим двигателем',
+  fishing: 'судно, занятое ловом рыбы (знак: два конуса вершинами вместе)',
+  ram: 'судно, ограниченное в возможности маневрировать (знак: шар — ромб — шар)',
+  motorsail: 'парусная яхта, идущая под мотором (знак: конус вершиной вниз)',
 };
 
 export function tackOf(v: Vessel, windFrom: number): 'starboard' | 'port' {
@@ -67,9 +76,28 @@ export function judge(sc: Scenario): Verdict {
     return { giveWay: 'other', ruleRu: 'МППСС, правило 13 — обгон', ruleEn: 'COLREG rule 13 — overtaking',
       whyRu: 'Другое судно догоняет вас сзади: обгоняющий уступает дорогу. Вы сохраняете курс и скорость.' };
   }
+  if (other.type === 'ship' && sc.context !== 'colreg') {
+    return sc.context === 'channel'
+      ? { giveWay: 'own', ruleRu: 'МППСС, правила 9(b) и 10(j) — узкость, система разделения движения', ruleEn: 'COLREG rules 9(b), 10(j) — narrow channel / TSS',
+        whyRu: 'В узкости и в системе разделения движения парусное судно и судно длиной менее 20 м не должны мешать судну, которое может безопасно идти только по фарватеру.' }
+      : { giveWay: 'own', ruleRu: 'CEVNI 6.02 — внутренние воды', ruleEn: 'CEVNI 6.02 — inland waters',
+        whyRu: 'На внутренних водах малые суда уступают дорогу всем остальным судам, в том числе большим.' };
+  }
   if (other.type === 'ship') {
-    return { giveWay: 'own', ruleRu: 'CEVNI 6.02 / МППСС, правило 9 — малые суда и узкости', ruleEn: 'CEVNI 6.02 / COLREG rule 9 — small craft & narrow channels',
-      whyRu: 'Малые суда уступают дорогу большим судам; в узкости парусное судно не должно мешать судну, которое может идти только по фарватеру.' };
+    return { giveWay: 'other', ruleRu: 'МППСС, правило 18(a)', ruleEn: 'COLREG rule 18(a)',
+      whyRu: 'В открытом море судно с механическим двигателем, даже большое, уступает дорогу парусному. Но большое судно маневрирует медленно и может вас не видеть: будьте готовы действовать сами (правило 17).' };
+  }
+  if (other.type === 'fishing') {
+    return { giveWay: 'own', ruleRu: 'МППСС, правило 18(b)(iii)', ruleEn: 'COLREG rule 18(b)(iii)',
+      whyRu: 'Парусное судно уступает дорогу судну, занятому ловом рыбы (тралом, сетями — не путать с рыбаком на удочке).' };
+  }
+  if (other.type === 'ram') {
+    return { giveWay: 'own', ruleRu: 'МППСС, правило 18(b)(ii)', ruleEn: 'COLREG rule 18(b)(ii)',
+      whyRu: 'Парусное судно уступает дорогу судну, ограниченному в возможности маневрировать (земснаряд, судно, ставящее буи, буксир с трудноуправляемым буксиром).' };
+  }
+  if (other.type === 'motorsail') {
+    return { giveWay: 'other', ruleRu: 'МППСС, правила 3(c), 25(e) и 18', ruleEn: 'COLREG rules 3(c), 25(e), 18',
+      whyRu: 'Парусная яхта под мотором (даже с поднятыми парусами) — это судно с механическим двигателем. Днём она несёт конус вершиной вниз и уступает дорогу судну под парусами.' };
   }
   if (other.type === 'motor') {
     return { giveWay: 'other', ruleRu: 'МППСС, правило 18; CEVNI 6.02', ruleEn: 'COLREG rule 18; CEVNI 6.02',
@@ -104,7 +132,7 @@ export function generate(rnd: () => number = Math.random): Scenario {
     const ownTwa = rand(50, 150, rnd) * D;
     const ownHeading = windFrom - side * ownTwa;
     const own: Vessel = { x: 0, y: 0, heading: ownHeading, type: 'sail', speed: 2 };
-    const kinds = ['cross', 'cross', 'same', 'same', 'overtakeByOther', 'overtakeOwn', 'motor', 'rowing', 'ship'];
+    const kinds = ['cross', 'cross', 'same', 'same', 'overtakeByOther', 'overtakeOwn', 'motor', 'rowing', 'ship', 'shipOpen', 'fishing', 'ram', 'motorsail', 'standon'];
     const kind = kinds[Math.floor(rnd() * kinds.length)];
     const [fx, fy] = fwd(ownHeading);
     const dist = 60;
@@ -128,8 +156,9 @@ export function generate(rnd: () => number = Math.random): Scenario {
         h = windFrom - oside * twa;
       } else {
         h = rand(0, 2 * Math.PI, rnd);
-        type = kind as VesselType;
-        if (type !== 'motor') context = 'inland';
+        type = kind === 'shipOpen' ? 'ship' : kind === 'standon' ? 'motor' : (kind as VesselType);
+        if (kind === 'rowing') context = 'inland';
+        if (kind === 'ship') context = rnd() < 0.5 ? 'channel' : 'inland';
       }
       const diff = Math.abs(wrap(h - ownHeading));
       if (diff < 35 * D || diff > 160 * D) continue; // need a clear crossing, avoid head-on ambiguity
@@ -140,6 +169,16 @@ export function generate(rnd: () => number = Math.random): Scenario {
       if (type === 'ship') { other.x = cx - ox * 70; other.y = cy - oy * 70; }
     }
     const sc: Scenario = { kind, own, other, windFrom, context };
+    if (kind === 'standon') {
+      sc.questionRu = 'Моторная лодка должна уступить вам дорогу, но курс не меняет, и расстояние быстро сокращается. Что делаете вы?';
+      sc.ruleRu = 'МППСС, правила 17 и 34(d)';
+      sc.whyRu = 'Привилегированное судно сначала сохраняет курс и скорость. Если ясно, что уступающее не маневрирует, подайте не менее пяти коротких сигналов и можете действовать сами; когда столкновения уже не избежать одним его манёвром — обязаны. Не отворачивайте влево к судну, которое у вас слева.';
+      sc.choices = [
+        { ru: 'Держу курс и скорость до последнего — я привилегирован.', correct: false },
+        { ru: 'Подаю 5 коротких сигналов; если он не отворачивает — сам меняю курс, чтобы избежать столкновения.', correct: true },
+        { ru: 'Сразу резко отворачиваю влево, ему навстречу.', correct: false },
+      ];
+    }
     if (other.type === 'sail' && Math.abs(Math.abs(wrap(windFrom - other.heading)) - Math.PI) < 20 * D) continue;
     if (kind === 'same' && Math.abs(upwind(own, windFrom) - upwind(other, windFrom)) < 10) continue;
     if ((kind === 'overtakeByOther' && !isOvertaking(other, own)) || (kind === 'overtakeOwn' && !isOvertaking(own, other))) continue;
@@ -155,7 +194,11 @@ export function generate(rnd: () => number = Math.random): Scenario {
 }
 
 export function questionRu(sc: Scenario): string {
+  if (sc.questionRu) return sc.questionRu;
   const what = VESSEL_RU[sc.other.type];
-  const where = sc.context === 'inland' ? ' (внутренние воды)' : '';
-  return `Вы — синяя лодка под парусом. Навстречу — ${what}${where}. Кто должен уступить дорогу?`;
+  const where = sc.context === 'inland' ? ' Внутренние воды.' : sc.context === 'channel' ? ' Узкий фарватер.' : sc.other.type === 'ship' ? ' Открытое море.' : '';
+  const situation = sc.kind === 'overtakeByOther' ? `Вас догоняет сзади ${what}.`
+    : sc.kind === 'overtakeOwn' ? `Вы догоняете ${what === 'гребная лодка' ? 'гребную лодку' : what === 'парусная лодка' ? 'парусную лодку' : what}.`
+    : `Ваши курсы пересекаются: ${what}.`;
+  return `Вы — синяя лодка под парусом. ${situation}${where} Кто должен уступить дорогу?`;
 }

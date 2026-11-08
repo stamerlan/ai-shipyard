@@ -1,5 +1,6 @@
 import { h, clear } from '../lib/dom';
 import { load, save } from '../lib/store';
+import { missionLabel, recordMission } from '../lib/progress';
 import { DEG, BEAUFORT_MS, wrap } from '../sim/physics';
 import { MISSIONS, MISSION_BY_ID, type MissionDef } from '../sim/missions';
 import { buildHarbour, HARBOURS, type Harbour } from '../sim/harbours';
@@ -43,7 +44,7 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
   const overlay = h('div', { class: 'overlay', style: { display: 'none' } });
   const stage = h('div', { class: 'sim-stage' }, canvas, hudTL, hudTR, objective, hintBox, toast, overlay);
 
-  const missionSel = h('select', { 'aria-label': 'Задание' }, MISSIONS.map((m) => h('option', { value: m.id }, m.ru)));
+  const missionSel = h('select', { 'aria-label': 'Задание' }, MISSIONS.map((m) => h('option', { value: m.id }, missionLabel(m.id, m.ru))));
   missionSel.value = mission.id;
   missionSel.addEventListener('change', () => { location.hash = `#/sim?m=${missionSel.value}`; });
   const harbourSel = h('select', { 'aria-label': 'Марина' },
@@ -128,17 +129,14 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
 
   function finish(won: boolean, text: string): void {
     finished = true; paused = true;
-    if (won) {
-      const best = load<Record<string, { done: boolean; best?: number }>>('missions', {});
-      const prev = best[mission.id];
-      best[mission.id] = { done: true, best: prev?.best ? Math.min(prev.best, time) : time };
-      save('missions', best);
-    }
+    const rec = won ? recordMission(mission.id, time) : null;
+    for (const o of missionSel.options) o.textContent = missionLabel(o.value, MISSION_BY_ID[o.value].ru);
     clear(overlay);
     overlay.style.display = '';
     overlay.append(h('div', { class: 'panel' },
       h('h2', { style: { marginTop: '0' } }, won ? '🎉 Готово' : '😬 Не получилось'),
       h('p', null, text),
+      rec?.newRecord ? h('p', null, h('b', null, `🏆 Новый рекорд: ${fmt(time)}`), rec.prev !== undefined ? ` (было ${fmt(rec.prev)})` : '') : rec ? h('p', { class: 'small muted' }, `Ваш рекорд: ${fmt(rec.prev!)}`) : null,
       h('div', { class: 'row' },
         h('button', { class: 'btn', onClick: () => reset(false) }, 'Ещё раз (новое место и ветер)'),
         h('button', { class: 'btn secondary', onClick: () => { location.hash = `#/sim?m=${leaving ? 'moor' : 'unmoor'}`; } }, leaving ? 'Швартовка' : 'Отход'),
@@ -190,6 +188,11 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
   };
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
+  // Key-up never arrives if the window loses focus while a key is held: release everything and pause.
+  const onBlur = () => { held.clear(); if (!paused && !finished && overlay.style.display === 'none') togglePause(); };
+  const onVis = () => { if (document.hidden) onBlur(); };
+  window.addEventListener('blur', onBlur);
+  document.addEventListener('visibilitychange', onVis);
 
   // ---------- Loop ----------
   let raf = 0, last = performance.now(), hudTimer = 0;
@@ -318,6 +321,8 @@ export function motorSimView(root: HTMLElement, params: URLSearchParams): () => 
     cancelAnimationFrame(raf);
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('keyup', onKeyUp);
+    window.removeEventListener('blur', onBlur);
+    document.removeEventListener('visibilitychange', onVis);
   };
 }
 

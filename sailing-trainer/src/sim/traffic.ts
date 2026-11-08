@@ -6,7 +6,7 @@ import { judge, type Vessel as RuleVessel, type VesselType } from '../rules/righ
 import { isBlocked, type World } from './world';
 import type { BoatState } from './physics';
 
-export type TrafficType = Exclude<VesselType, 'rowing'>;
+export type TrafficType = Extract<VesselType, 'motor' | 'sail' | 'ship'>;
 
 export interface AIVessel {
   id: number;
@@ -136,7 +136,7 @@ export class Traffic {
       const safe = v.type === 'ship' ? 35 : 16;
 
       if (!v.encounter && tcpa > 0 && tcpa < 40 && cpa < safe && dist < 160) {
-        const verdict = judge({ kind: 'live', own, other: { x: v.x, y: v.y, heading: v.heading, type: v.type, speed: v.speed }, windFrom, context: v.type === 'ship' ? 'inland' : 'colreg' });
+        const verdict = judge({ kind: 'live', own, other: { x: v.x, y: v.y, heading: v.heading, type: v.type, speed: v.speed }, windFrom, context: 'colreg' });
         v.encounter = { giveWay: verdict.giveWay, whyRu: verdict.whyRu, ruleRu: verdict.ruleRu, violation: false, ownHeading0: s.heading };
         events.push({ kind: 'encounter', vessel: v, textRu: verdict.giveWay === 'own'
           ? `Вы должны уступить дорогу: ${TRAFFIC_RU[v.type]}. ${verdict.whyRu}`

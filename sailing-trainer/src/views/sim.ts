@@ -1,5 +1,6 @@
 import { h, clear } from '../lib/dom';
 import { settings, saveSettings, load, save } from '../lib/store';
+import { missionLabel, recordMission, fmtTime } from '../lib/progress';
 import {
   initialState, step, switchSide, windAt, pointOfSail, tackOf, DEG, BEAUFORT_MS,
   POINT_OF_SAIL_RU, type BoatState, type Controls, type Telemetry, type WindModel, type SimEvent,
@@ -65,7 +66,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   const overlay = h('div', { class: 'overlay', style: { display: 'none' } });
   const stage = h('div', { class: 'sim-stage' }, canvas, hudTL, hudTR, hudBL, objective, hintBox, toast, overlay);
 
-  const missionSel = h('select', { 'aria-label': 'Задание' }, MISSIONS.map((m) => h('option', { value: m.id }, m.ru)));
+  const missionSel = h('select', { 'aria-label': 'Задание' }, MISSIONS.map((m) => h('option', { value: m.id }, missionLabel(m.id, m.ru))));
+  const syncMissionLabels = () => { for (const o of missionSel.options) o.textContent = missionLabel(o.value, MISSION_BY_ID[o.value].ru); };
   missionSel.value = mission.id;
   missionSel.addEventListener('change', () => {
     if (MISSION_BY_ID[missionSel.value].motor) { location.hash = `#/sim?m=${missionSel.value}`; return; }
@@ -187,12 +189,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   function finish(won: boolean, text: string): void {
     finished = true;
     paused = true;
-    if (won) {
-      const best = load<Record<string, { done: boolean; best?: number }>>('missions', {});
-      const prev = best[mission.id];
-      best[mission.id] = { done: true, best: prev?.best ? Math.min(prev.best, time) : time };
-      save('missions', best);
-    }
+    const rec = won ? recordMission(mission.id, time) : null;
+    syncMissionLabels();
     const idx = MISSIONS.indexOf(mission);
     const nextM = MISSIONS[(idx + 1) % MISSIONS.length];
     clear(overlay);
@@ -200,6 +198,7 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     overlay.append(h('div', { class: 'panel' },
       h('h2', { style: { marginTop: '0' } }, won ? '🎉 Задание выполнено' : '😬 Не получилось'),
       h('p', null, text),
+      rec?.newRecord ? h('p', null, h('b', null, `🏆 Новый рекорд: ${fmtTime(time)}`), rec.prev !== undefined ? ` (было ${fmtTime(rec.prev)})` : '') : rec ? h('p', { class: 'small muted' }, `Ваш рекорд: ${fmtTime(rec.prev!)}`) : null,
       h('div', { class: 'row' },
         h('button', { class: 'btn', onClick: () => reset(false) }, 'Ещё раз'),
         won ? h('button', { class: 'btn secondary', onClick: () => { if (nextM.motor) { location.hash = `#/sim?m=${nextM.id}`; return; } mission = nextM; missionSel.value = nextM.id; reset(true); } }, `Дальше: ${nextM.ru}`) : null,
@@ -312,6 +311,11 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
   };
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
+  // Key-up never arrives if the window loses focus while a key is held: release everything and pause.
+  const onBlur = () => { held.clear(); if (!paused && !finished && overlay.style.display === 'none') togglePause(); };
+  const onVis = () => { if (document.hidden) onBlur(); };
+  window.addEventListener('blur', onBlur);
+  document.addEventListener('visibilitychange', onVis);
 
   const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
   /** A short tap still moves the sheet a little. */
@@ -487,6 +491,8 @@ export function simView(root: HTMLElement, params: URLSearchParams): () => void 
     cancelAnimationFrame(raf);
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('keyup', onKeyUp);
+    window.removeEventListener('blur', onBlur);
+    document.removeEventListener('visibilitychange', onVis);
   };
 }
 

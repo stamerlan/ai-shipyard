@@ -3,7 +3,7 @@ import { YACHT, rect, type Harbour, type MooredBoat, type Slot } from './harbour
 import type { MotorState } from './motor';
 import type { Wind } from './physics';
 
-const LIGHT: Record<string, string> = { red: '#ff3b3b', green: '#39ff6a', white: '#fffbe6' };
+const LIGHT: Record<string, string> = { red: '#ff3b3b', green: '#39ff6a', white: '#fffbe6', yellow: '#ffd23f' };
 
 export class HarbourRenderer {
   private wake: { x: number; y: number; t: number }[] = [];
@@ -33,8 +33,11 @@ export class HarbourRenderer {
     ctx.fillStyle = h.water ? '#cfc6b2' : '#2a7bb3';
     ctx.fillRect(0, 0, w, hgt);
     if (h.water) {
+      // All rings in one path, even–odd: islands and piers are holes in the water.
+      ctx.beginPath();
+      for (const r of h.water) r.forEach(([x, y], i) => (i ? ctx.lineTo(tx(x), ty(y)) : ctx.moveTo(tx(x), ty(y))));
       ctx.fillStyle = '#2a7bb3';
-      for (const p of h.water) { poly(p); ctx.fill(); }
+      ctx.fill('evenodd');
     }
     if (h.decor) {
       ctx.fillStyle = '#a99c86';
@@ -131,6 +134,12 @@ export class HarbourRenderer {
       ctx.beginPath(); ctx.arc(tx(l.x), ty(l.y), Math.max(4, 0.8 * k) * (on ? 1.3 : 1), 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     }
 
+    if (h.labels) {
+      ctx.font = `italic 600 ${Math.max(12, Math.min(18, 1.2 * k))}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(40,40,40,0.75)';
+      for (const lb of h.labels) ctx.fillText(lb.text, tx(lb.x), ty(lb.y));
+    }
     // own boat
     this.drawOwn(ctx, s, tiller, tx, ty, k, time);
     this.drawMinimap(ctx, h, s, w, hgt);
@@ -250,7 +259,12 @@ export class HarbourRenderer {
     ctx.beginPath(); ctx.rect(ox, oy, mw, mh); ctx.clip();
     ctx.fillStyle = h.water ? '#b9b3a3' : 'rgba(20,70,110,0.9)'; ctx.fillRect(ox, oy, mw, mh);
     const fill = (polys: Pt[][], col: string) => { ctx.fillStyle = col; for (const p of polys) { ctx.beginPath(); p.forEach(([x, y], i) => (i ? ctx.lineTo(mx(x), my(y)) : ctx.moveTo(mx(x), my(y)))); ctx.closePath(); ctx.fill(); } };
-    if (h.water) fill(h.water, 'rgba(20,70,110,0.95)');
+    if (h.water) {
+      ctx.beginPath();
+      for (const r of h.water) r.forEach(([x, y], i) => (i ? ctx.lineTo(mx(x), my(y)) : ctx.moveTo(mx(x), my(y))));
+      ctx.fillStyle = 'rgba(20,70,110,0.95)';
+      ctx.fill('evenodd');
+    }
     fill(h.land, '#b9b3a3');
     fill([...h.pontoons, ...h.fingers], '#a77a4a');
     fill(h.moored.map((m) => rect(m.x, m.y, m.halfB * 2, m.halfL * 2, m.heading)), '#e8e8e8');

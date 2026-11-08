@@ -328,3 +328,21 @@ kbd { background: #eef2f5; border: 1px solid #ccd5dc; border-radius: 4px; paddin
 
 .r-motor .ctl-name .btn { font-size: 12px; padding: 4px 8px; white-space: nowrap; }
 @media (max-width: 760px) { .r-motor .ctl-name .btn { font-size: 11px; padding: 3px 6px; } }
+
+/* ---------- Phone "Ещё" menu ---------- */
+.more-sheet { display: none; }
+@media (max-width: 760px) {
+  .bottomnav { overflow-x: visible; }
+  .bottomnav a, .bottomnav .more-btn { flex: 1 1 0; min-width: 0; }
+  .more-btn { border: 0; background: none; color: var(--muted); font-size: 11px; padding: 6px 4px; cursor: pointer; }
+  .more-btn span { display: block; font-size: 19px; line-height: 1.2; }
+  .more-btn.active { color: var(--sea); font-weight: 600; }
+  .more-sheet:not([hidden]) {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px; position: fixed; right: 8px; left: 8px;
+    bottom: calc(60px + env(safe-area-inset-bottom)); z-index: 30; background: #fff; border-radius: 14px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25); padding: 10px;
+  }
+  .more-sheet a { text-decoration: none; color: var(--ink); padding: 10px; border-radius: 10px; background: #eef4f9; font-weight: 600; font-size: 14px; }
+  .more-sheet a span { margin-right: 6px; }
+  .more-sheet a.active { background: var(--navy); color: #fff; }
+}

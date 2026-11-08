@@ -167,3 +167,42 @@ export const BUOY_RU: Record<BuoyKind, string> = {
   safe: 'Безопасная вода',
   special: 'Специальный знак',
 };
+
+/**
+ * Fast even–odd point-in-water test for large real maps: polygon edges are bucketed by
+ * horizontal bands, so a query only looks at the edges crossing its band.
+ */
+export class WaterIndex {
+  private bands = new Map<number, number[]>();
+  private ex: Float64Array;
+  constructor(public rings: Pt[][], private bandH = 8) {
+    const n = rings.reduce((a, r) => a + r.length, 0);
+    this.ex = new Float64Array(n * 4);
+    let k = 0;
+    for (const r of rings) {
+      for (let i = 0; i < r.length; i++) {
+        const [x1, y1] = r[i], [x2, y2] = r[(i + 1) % r.length];
+        this.ex.set([x1, y1, x2, y2], k * 4);
+        const b0 = Math.floor(Math.min(y1, y2) / bandH), b1 = Math.floor(Math.max(y1, y2) / bandH);
+        for (let b = b0; b <= b1; b++) {
+          let list = this.bands.get(b);
+          if (!list) { list = []; this.bands.set(b, list); }
+          list.push(k);
+        }
+        k++;
+      }
+    }
+  }
+
+  contains(x: number, y: number): boolean {
+    const list = this.bands.get(Math.floor(y / this.bandH));
+    if (!list) return false;
+    let inside = false;
+    const e = this.ex;
+    for (const k of list) {
+      const x1 = e[k * 4], y1 = e[k * 4 + 1], x2 = e[k * 4 + 2], y2 = e[k * 4 + 3];
+      if (y1 > y !== y2 > y && x < ((x2 - x1) * (y - y1)) / (y2 - y1) + x1) inside = !inside;
+    }
+    return inside;
+  }
+}

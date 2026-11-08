@@ -67,6 +67,7 @@ export function cardsView(root: HTMLElement): () => void {
     const next = () => {
       clear(body);
       if (queue.length === 0) {
+        keyHandler = null; // the summary screen must not grade the last card again
         body.append(h('div', { class: 'panel flash' },
           h('div', { class: 'big' }, 'Сессия завершена!'),
           h('p', null, `Знаю: ${tally.good}, с трудом: ${tally.hard}, не помню: ${tally.again}.`),

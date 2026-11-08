@@ -3,8 +3,15 @@ import { CARDS, type Card } from '../data/cards';
 import { SITUATIONS, COMMANDS } from '../data/maneuvers';
 import { progressBar } from '../lib/ui';
 import { cardArt } from './cards';
+import { grade } from '../lib/srs';
 
 interface Question {
+  /** Unique key so a run never repeats a question. */
+  key: string;
+  /** Flashcard to send back to review if answered wrongly. */
+  cardId?: string;
+  /** Short text for the list of mistakes. */
+  title: string;
   prompt: HTMLElement;
   options: (string | HTMLElement)[];
   answer: number;
@@ -38,36 +45,45 @@ function poolFor(c: Card, all: Card[]): Card[] {
   return same.length >= 4 ? same : all;
 }
 
-function make(type: QuizType): Question {
+/** Pick an item that has not been used in this run yet (falls back to any item if all are used). */
+function fresh<T>(pool: T[], key: (t: T) => string, used: Set<string>): T {
+  const left = pool.filter((p) => !used.has(key(p)));
+  return pick(left.length ? left : pool);
+}
+
+function make(type: QuizType, used: Set<string>): Question {
   switch (type) {
     case 'def': {
-      const c = pick(terms);
+      const c = fresh(terms, (x) => `def:${x.id}`, used);
       const { opts, answer } = options(c, poolFor(c, terms), (x) => x.ru);
-      return { prompt: h('div', null, h('div', { class: 'muted small' }, 'Какой это термин?'), h('div', { style: { fontSize: '18px' } }, c.defRu)),
+      return { key: `def:${c.id}`, cardId: c.id, title: `${c.ru} — ${c.defRu}`, prompt: h('div', null, h('div', { class: 'muted small' }, 'Какой это термин?'), h('div', { style: { fontSize: '18px' } }, c.defRu)),
         options: opts.map((o) => h('span', null, o.ru, ' ', en(o.en, 'small'))), answer, explain: `${c.ru} (${c.en}).` };
     }
     case 'sign': {
-      const c = pick(signs);
+      const c = fresh(signs, (x) => `sign:${x.id}`, used);
       const { opts, answer } = options(c, poolFor(c, signs), (x) => x.ru);
-      return { prompt: h('div', null, h('div', { class: 'muted small' }, c.sound ? 'Что означает этот звуковой сигнал?' : 'Что означает этот знак?'), cardArt(c)),
+      return { key: `sign:${c.id}`, cardId: c.id, title: `${c.code ? c.code + ' ' : ''}${c.ru}`, prompt: h('div', null, h('div', { class: 'muted small' }, c.sound ? 'Что означает этот звуковой сигнал?' : 'Что означает этот знак?'), cardArt(c)),
         options: opts.map((o) => h('span', null, o.ru, ' ', en(o.en, 'small'))), answer, explain: `${c.code ? c.code + ' — ' : ''}${c.ru}. ${c.defRu}` };
     }
     case 'situation': {
-      const s = pick(SITUATIONS);
+      const s = fresh(SITUATIONS, (x) => `sit:${x.id}`, used);
       const idx = shuffle(s.options.map((_, i) => i));
-      return { prompt: h('div', null, h('div', { style: { fontSize: '18px' } }, s.qRu), h('div', { class: 'small' }, en(s.qEn))),
+      return { key: `sit:${s.id}`, title: `${s.qRu} → ${s.options[s.answer].ru}`, prompt: h('div', null, h('div', { style: { fontSize: '18px' } }, s.qRu), h('div', { class: 'small' }, en(s.qEn))),
         options: idx.map((i) => h('span', null, s.options[i].ru, ' ', en(s.options[i].en, 'small'))), answer: idx.indexOf(s.answer), explain: s.whyRu };
     }
     case 'command': {
-      const c = pick(COMMANDS);
+      const c = fresh(COMMANDS, (x) => `cmd:${x.id}`, used);
       const { opts, answer } = options(c, COMMANDS, (x) => x.ru);
-      return { prompt: h('div', null, h('div', { class: 'muted small' }, 'Какая команда?'), h('div', { style: { fontSize: '18px' } }, c.situationRu)),
+      return { key: `cmd:${c.id}`, cardId: `c:${c.id}`, title: `${c.situationRu} → «${c.ru}»`, prompt: h('div', null, h('div', { class: 'muted small' }, 'Какая команда?'), h('div', { style: { fontSize: '18px' } }, c.situationRu)),
         options: opts.map((o) => h('span', null, `«${o.ru}» `, en(o.en, 'small'))), answer, explain: `«${c.ru}» — ${c.en}` };
     }
   }
 }
 
-export function quizView(root: HTMLElement, params: URLSearchParams): void {
+export function quizView(root: HTMLElement, params: URLSearchParams): () => void {
+  let keyHandler: ((e: KeyboardEvent) => void) | null = null;
+  const onKey = (e: KeyboardEvent) => keyHandler?.(e);
+  window.addEventListener('keydown', onKey);
   const chosen = new Set<QuizType>((params.get('type')?.split(',') as QuizType[]) ?? []);
   if (chosen.size === 0) TYPES.forEach((t) => chosen.add(t.id));
   const body = h('div');
@@ -88,27 +104,40 @@ export function quizView(root: HTMLElement, params: URLSearchParams): void {
   function run(n: number): void {
     const types = [...chosen];
     let i = 0, score = 0;
+    const used = new Set<string>();
+    const mistakes: Question[] = [];
     const next = () => {
       clear(body);
+      keyHandler = null;
       if (i >= n) {
         const pct = Math.round((score / n) * 100);
         body.append(h('div', { class: 'panel flash' },
           h('div', { class: 'big' }, `${score} из ${n} (${pct}%)`),
           h('p', null, pct >= 90 ? 'Отлично! Можно выходить на воду.' : pct >= 70 ? 'Хорошо, но есть что повторить.' : 'Стоит повторить карточки и попробовать снова.'),
+          mistakes.length ? h('div', { style: { textAlign: 'left' } },
+            h('h3', null, 'Ошибки'),
+            h('ul', { class: 'small' }, mistakes.map((m) => h('li', null, m.title))),
+            mistakes.some((m) => m.cardId) ? h('p', { class: 'small muted' }, 'Соответствующие карточки отмечены к повторению — они появятся в разделе «Карточки».') : null) : null,
           h('div', { class: 'row', style: { justifyContent: 'center' } },
-            h('button', { class: 'btn', onClick: () => run(n) }, 'Ещё раз'), h('button', { class: 'btn secondary', onClick: setup }, 'Темы'))));
+            h('button', { class: 'btn', onClick: () => run(n) }, 'Ещё раз'), h('button', { class: 'btn secondary', onClick: setup }, 'Темы'),
+            mistakes.some((m) => m.cardId) ? h('a', { class: 'btn secondary', href: '#/cards' }, 'Повторить ошибки') : null)));
         return;
       }
-      const q = make(pick(types));
+      const q = make(pick(types), used);
+      used.add(q.key);
       const fb = h('div');
       const nextBtn = h('button', { class: 'btn', style: { marginTop: '12px', display: 'none' }, onClick: () => { i++; next(); } }, i + 1 < n ? 'Дальше' : 'Результат');
       const opts = h('div', { class: 'options' });
       q.options.forEach((o, k) => {
-        const b = h('button', null, o);
+        const b = h('button', null, h('kbd', null, String(k + 1)), ' ', o);
         b.addEventListener('click', () => {
           for (const x of opts.querySelectorAll('button')) x.disabled = true;
           const right = k === q.answer;
           if (right) score++;
+          else {
+            mistakes.push(q);
+            if (q.cardId) grade(q.cardId, 'again');
+          }
           b.classList.add(right ? 'correct' : 'wrong');
           opts.children[q.answer].classList.add('correct');
           fb.className = `feedback ${right ? 'ok' : 'bad'}`;
@@ -117,7 +146,13 @@ export function quizView(root: HTMLElement, params: URLSearchParams): void {
         });
         opts.append(b);
       });
-      body.append(progressBar(i / n), h('p', { class: 'small muted' }, `Вопрос ${i + 1} из ${n} · верно: ${score}`),
+      keyHandler = (e: KeyboardEvent) => {
+        const btns = [...opts.querySelectorAll('button')];
+        const num = Number(e.key);
+        if (num >= 1 && num <= btns.length && !btns[num - 1].disabled) btns[num - 1].click();
+        else if (e.key === 'Enter' && nextBtn.style.display !== 'none') nextBtn.click();
+      };
+      body.append(progressBar(i / n), h('p', { class: 'small muted' }, `Вопрос ${i + 1} из ${n} · верно: ${score} · клавиши 1–4, Enter`),
         h('div', { class: 'panel' }, h('div', { class: 'flash', style: { minHeight: '0', padding: '4px' } }, q.prompt), opts, fb, nextBtn));
     };
     next();
@@ -125,4 +160,5 @@ export function quizView(root: HTMLElement, params: URLSearchParams): void {
 
   root.append(h('h1', null, 'Тесты ', en('Quizzes', 'small')), h('p', { class: 'sub' }, 'Выберите темы и проверьте себя.'), body);
   setup();
+  return () => window.removeEventListener('keydown', onKey);
 }

@@ -1,5 +1,6 @@
 import { h, en } from '../lib/dom';
-import { stats, resetProgress } from '../lib/srs';
+import { stats } from '../lib/srs';
+import { exportProgress, importProgress, resetAllProgress } from '../lib/progress';
 import { load } from '../lib/store';
 import { CARDS } from '../data/cards';
 import { TERMS } from '../data/terms';
@@ -40,6 +41,18 @@ export function homeView(root: HTMLElement): void {
     h('p', { class: 'small muted', style: { marginTop: '22px' } },
       'Изображения знаков упрощены, а физика симулятора приближённая — это тренажёр для повторения, а не замена официальных правил и практики на воде. ',
       'Прогресс хранится только в этом браузере. ',
-      h('button', { class: 'btn secondary small', onClick: () => { if (confirm('Сбросить прогресс карточек?')) { resetProgress(); location.reload(); } } }, 'Сбросить прогресс')),
+      h('span', { class: 'row', style: { display: 'inline-flex', marginTop: '6px' } },
+        h('button', { class: 'btn secondary small', onClick: () => {
+          const blob = new Blob([exportProgress()], { type: 'application/json' });
+          const a = h('a', { href: URL.createObjectURL(blob), download: `parus-progress-${new Date().toISOString().slice(0, 10)}.json` });
+          document.body.append(a); a.click(); a.remove();
+        } }, '⬇ Сохранить прогресс в файл'),
+        h('label', { class: 'btn secondary small' }, '⬆ Загрузить из файла', h('input', { type: 'file', accept: 'application/json,.json', style: { display: 'none' }, onChange: async (e: Event) => {
+          const f = (e.target as HTMLInputElement).files?.[0];
+          if (!f) return;
+          try { const n = importProgress(await f.text()); alert(`Загружено разделов: ${n}`); location.reload(); }
+          catch (err) { alert(`Не удалось загрузить: ${(err as Error).message}`); }
+        } })),
+        h('button', { class: 'btn secondary small', onClick: () => { if (confirm('Сбросить весь прогресс: карточки и задания симулятора?')) { resetAllProgress(); location.reload(); } } }, 'Сбросить прогресс'))),
   );
 }

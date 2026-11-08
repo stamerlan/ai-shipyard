@@ -13,18 +13,18 @@ import { simView } from './views/sim';
 
 export type View = (root: HTMLElement, params: URLSearchParams) => void | (() => void);
 
-interface Route { path: string; ru: string; icon: string; view: View; full?: boolean }
+interface Route { path: string; ru: string; icon: string; view: View; full?: boolean; main?: boolean }
 
 const ROUTES: Route[] = [
-  { path: '', ru: 'Главная', icon: '⚓', view: homeView },
+  { path: '', ru: 'Главная', icon: '⚓', view: homeView, main: true },
   { path: 'glossary', ru: 'Словарь', icon: '📖', view: glossaryView },
-  { path: 'cards', ru: 'Карточки', icon: '🃏', view: cardsView },
-  { path: 'quiz', ru: 'Тесты', icon: '✅', view: quizView },
+  { path: 'cards', ru: 'Карточки', icon: '🃏', view: cardsView, main: true },
+  { path: 'quiz', ru: 'Тесты', icon: '✅', view: quizView, main: true },
   { path: 'parts', ru: 'Устройство', icon: '⛵', view: partsView },
   { path: 'signs', ru: 'Знаки', icon: '🚩', view: signsView },
   { path: 'maneuvers', ru: 'Манёвры', icon: '🔄', view: maneuversView },
   { path: 'rules', ru: 'Расхождение', icon: '⚠️', view: rulesView },
-  { path: 'sim', ru: 'Симулятор', icon: '🌊', view: simView, full: true },
+  { path: 'sim', ru: 'Симулятор', icon: '🌊', view: simView, full: true, main: true },
 ];
 
 const app = document.getElementById('app')!;
@@ -38,10 +38,18 @@ app.append(
   bottom,
 );
 
+// Phone: four main sections in the bottom bar, the rest under "Ещё".
+const more = h('div', { class: 'more-sheet', hidden: true });
+const moreBtn = h('button', { class: 'more-btn', 'aria-expanded': 'false' }, h('span', null, '☰'), 'Ещё');
+moreBtn.addEventListener('click', (e) => { e.stopPropagation(); more.hidden = !more.hidden; moreBtn.setAttribute('aria-expanded', String(!more.hidden)); });
+document.addEventListener('click', () => { more.hidden = true; moreBtn.setAttribute('aria-expanded', 'false'); });
 for (const r of ROUTES) {
   nav.append(h('a', { href: `#/${r.path}`, 'data-path': r.path }, r.ru));
-  bottom.append(h('a', { href: `#/${r.path}`, 'data-path': r.path }, h('span', null, r.icon), r.ru));
+  const link = h('a', { href: `#/${r.path}`, 'data-path': r.path }, h('span', null, r.icon), r.ru);
+  (r.main ? bottom : more).append(link);
 }
+bottom.append(moreBtn);
+app.append(more);
 
 function syncEn(): void {
   enBtn.setAttribute('aria-pressed', String(settings.showEn));
@@ -65,6 +73,8 @@ function render(): void {
   for (const a of document.querySelectorAll<HTMLAnchorElement>('[data-path]')) {
     a.classList.toggle('active', a.dataset.path === route.path);
   }
+  moreBtn.classList.toggle('active', !route.main);
+  more.hidden = true;
   document.title = route.path ? `${route.ru} — Парусный тренажёр` : 'Парусный тренажёр';
   cleanup = route.view(main, new URLSearchParams(query ?? ''));
   window.scrollTo(0, 0);
