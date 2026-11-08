@@ -29,9 +29,19 @@ export class HarbourRenderer {
     const ty = (y: number) => hgt / 2 - (y - s.y) * k;
     const poly = (p: Pt[]) => { ctx.beginPath(); p.forEach(([x, y], i) => (i ? ctx.lineTo(tx(x), ty(y)) : ctx.moveTo(tx(x), ty(y)))); ctx.closePath(); };
 
-    // water
-    ctx.fillStyle = '#2a7bb3';
+    // water (real maps: land background with water polygons on top)
+    ctx.fillStyle = h.water ? '#cfc6b2' : '#2a7bb3';
     ctx.fillRect(0, 0, w, hgt);
+    if (h.water) {
+      ctx.fillStyle = '#2a7bb3';
+      for (const p of h.water) { poly(p); ctx.fill(); }
+    }
+    if (h.decor) {
+      ctx.fillStyle = '#a99c86';
+      ctx.strokeStyle = '#8b7f6b';
+      ctx.lineWidth = 1;
+      for (const b of h.decor.buildings) { poly(b); ctx.fill(); ctx.stroke(); }
+    }
     ctx.fillStyle = 'rgba(255,255,255,0.12)';
     const step = 6;
     const x0 = Math.floor((s.x - w / 2 / k) / step) * step, y0 = Math.floor((s.y - hgt / 2 / k) / step) * step;
@@ -50,6 +60,13 @@ export class HarbourRenderer {
       ctx.beginPath(); ctx.moveTo(tx(this.wake[i - 1].x), ty(this.wake[i - 1].y)); ctx.lineTo(tx(this.wake[i].x), ty(this.wake[i].y)); ctx.stroke();
     }
 
+    if (h.decor) {
+      ctx.setLineDash([8, 6]);
+      ctx.strokeStyle = 'rgba(255,90,90,0.55)';
+      ctx.lineWidth = 2;
+      for (const o of h.decor.outline) { poly(o); ctx.stroke(); }
+      ctx.setLineDash([]);
+    }
     // land and quays
     for (const p of h.land) {
       poly(p);
@@ -87,6 +104,22 @@ export class HarbourRenderer {
       this.drawYacht(ctx, b, tx, ty, k);
     }
 
+    // bridges (drawbridges are open for us)
+    if (h.decor) {
+      for (const b of h.decor.bridges) {
+        poly(b);
+        ctx.fillStyle = 'rgba(90,90,90,0.45)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(40,40,40,0.8)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        const cx = b.reduce((a, q) => a + q[0], 0) / b.length, cy = b.reduce((a, q) => a + q[1], 0) / b.length;
+        ctx.fillStyle = '#fff';
+        ctx.font = `600 ${Math.max(10, 0.9 * k)}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('мост', tx(cx), ty(cy) + 4);
+      }
+    }
     // target berth
     if (showTarget) this.drawTarget(ctx, h.target, tx, ty, k, time);
 
@@ -101,6 +134,13 @@ export class HarbourRenderer {
     // own boat
     this.drawOwn(ctx, s, tiller, tx, ty, k, time);
     this.drawMinimap(ctx, h, s, w, hgt);
+    if (h.attributionRu) {
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      const phone = w < 600;
+      ctx.textAlign = phone ? 'center' : 'left';
+      ctx.fillText('© OpenStreetMap contributors (ODbL), via OsmAnd', phone ? w / 2 : 8, phone ? 12 : hgt - 6);
+    }
     void wind;
   }
 
@@ -208,8 +248,9 @@ export class HarbourRenderer {
     const mx = (x: number) => ox + (x - b.minX) * sc, my = (y: number) => oy + (b.maxY - y) * sc;
     ctx.save();
     ctx.beginPath(); ctx.rect(ox, oy, mw, mh); ctx.clip();
-    ctx.fillStyle = 'rgba(20,70,110,0.9)'; ctx.fillRect(ox, oy, mw, mh);
+    ctx.fillStyle = h.water ? '#b9b3a3' : 'rgba(20,70,110,0.9)'; ctx.fillRect(ox, oy, mw, mh);
     const fill = (polys: Pt[][], col: string) => { ctx.fillStyle = col; for (const p of polys) { ctx.beginPath(); p.forEach(([x, y], i) => (i ? ctx.lineTo(mx(x), my(y)) : ctx.moveTo(mx(x), my(y)))); ctx.closePath(); ctx.fill(); } };
+    if (h.water) fill(h.water, 'rgba(20,70,110,0.95)');
     fill(h.land, '#b9b3a3');
     fill([...h.pontoons, ...h.fingers], '#a77a4a');
     fill(h.moored.map((m) => rect(m.x, m.y, m.halfB * 2, m.halfL * 2, m.heading)), '#e8e8e8');

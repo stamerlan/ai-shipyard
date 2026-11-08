@@ -101,6 +101,7 @@ export function touching(h: Harbour, s: Pose): ObstacleKind | null {
   const pts = hullPoints(s);
   const inAny = (polys: Pt[][]) => polys.some((poly) => pts.some(([x, y]) => pointInPoly(x, y, poly)));
   if (inAny(h.land)) return 'land';
+  if (h.water && pts.some(([x, y]) => !h.water!.some((w) => pointInPoly(x, y, w)))) return 'land';
   if (inAny(h.pontoons)) return 'pontoon';
   if (inAny(h.fingers)) return 'finger';
   for (const b of h.moored) {

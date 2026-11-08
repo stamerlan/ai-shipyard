@@ -325,3 +325,6 @@ kbd { background: #eef2f5; border: 1px solid #ccd5dc; border-radius: 4px; paddin
   .side-btn { white-space: nowrap; }
   .sail-state .st { padding: 1px 6px; }
 }
+
+.r-motor .ctl-name .btn { font-size: 12px; padding: 4px 8px; white-space: nowrap; }
+@media (max-width: 760px) { .r-motor .ctl-name .btn { font-size: 11px; padding: 3px 6px; } }
